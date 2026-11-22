@@ -1,12 +1,21 @@
 
+# ==========================================
+# BoardBuddy - Flutter Project
+# Git Ignore Configuration
+# ==========================================
+
 # Dart and Flutter generated files
 .dart_tool/
 .packages
+.pub/
+.pub-cache/
 build/
 doc/api/
+coverage/
 
-# Environment files
-.env*
+# Flutter generated files
+.flutter-plugins
+.flutter-plugins-dependencies
 
 # Generated JavaScript
 *.dart.js
@@ -16,13 +25,84 @@ doc/api/
 *.js.deps
 *.js.map
 
-# Flutter generated files
-.flutter-plugins
-.flutter-plugins-dependencies
+# ==========================================
+# Environment Variables and Secrets
+# ==========================================
 
-# IDE files
+.env
+.env.*
+!.env.example
+
+# Private API keys and credentials
+secrets/
+credentials/
+*.pem
+*.p8
+*.p12
+*.key
+
+# Firebase Admin SDK and service accounts
+*serviceAccount*.json
+*service-account*.json
+*adminsdk*.json
+*firebase-adminsdk*.json
+
+# ==========================================
+# Android
+# ==========================================
+
+android/.gradle/
+android/.kotlin/
+android/local.properties
+android/key.properties
+
+# Android signing credentials
+*.jks
+*.keystore
+
+# ==========================================
+# IDE and Editor Files
+# ==========================================
+
 .idea/
 *.iml
 
-# Kotlin generated files
-android/.kotlin/
+# VS Code local configuration
+.vscode/settings.json
+.vscode/launch.json
+
+# ==========================================
+# Operating System Files
+# ==========================================
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==========================================
+# Temporary and Log Files
+# ==========================================
+
+*.log
+*.tmp
+*.bak
+*.swp
+
+# ==========================================
+# Firebase Client Configuration
+# ==========================================
+
+# These are standard Firebase CLIENT configurations.
+# They can remain tracked by Git:
+#
+# lib/firebase_options.dart
+# firebase.json
+# android/app/google-services.json
+#
+# Never commit Firebase Admin SDK private keys.
+# Firebase security is enforced through Authentication,
+# Firestore Security Rules, and appropriate access controls.
+
+# ==========================================
+# End of BoardBuddy .gitignore
+# ==========================================

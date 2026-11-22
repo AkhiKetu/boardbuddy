@@ -1,54 +1,100 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../providers/auth_provider.dart';
 import '../../providers/board_provider.dart';
 import '../../providers/card_provider.dart';
 
 class ProfileScreen extends StatelessWidget {
   const ProfileScreen({super.key});
 
-  // Find the current user's name from board membership
-  String _getUserName(BoardProvider provider, String userId) {
-    for (final board in provider.boards) {
-      final name = board.memberNames[userId];
+  // Confirm before logging out.
+  Future<void> _confirmLogout(BuildContext context) async {
+    final authProvider = context.read<AuthProvider>();
 
-      if (name != null && name.trim().isNotEmpty) {
-        return name;
-      }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Log Out?'),
+          content: const Text(
+            'Are you sure you want to log out of BoardBuddy?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.pop(dialogContext, false);
+              },
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(dialogContext, true);
+              },
+              child: const Text('Log Out'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (!context.mounted || confirmed != true) {
+      return;
     }
 
-    return 'BoardBuddy User';
+    // Sign out from Firebase Authentication.
+    await authProvider.logout();
+
+    if (!context.mounted) return;
+
+    // AuthGate automatically returns to Login
+    // when logout succeeds.
+    if (authProvider.isLoggedIn) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            authProvider.errorMessage ?? 'Unable to log out. Please try again.',
+          ),
+        ),
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final authProvider = context.watch<AuthProvider>();
     final boardProvider = context.watch<BoardProvider>();
     final cardProvider = context.watch<CardProvider>();
 
-    // Current demo account
-    final userId = boardProvider.currentUserId;
-    final userName = _getUserName(boardProvider, userId);
+    // Firebase account information
+    final firebaseUser = authProvider.user;
 
-    // Boards joined by the current user
+    final displayName = firebaseUser?.displayName?.trim();
+
+    final userName = displayName != null && displayName.isNotEmpty
+        ? displayName
+        : 'BoardBuddy User';
+
+    final userEmail = firebaseUser?.email ?? 'No email available';
+
+    final initial = userName[0].toUpperCase();
+
+    // Temporary statistics based on existing mock data.
+    // These will use real Firebase user IDs after
+    // Firestore integration.
+    final demoUserId = boardProvider.currentUserId;
+
     final joinedBoards = boardProvider.boards
-        .where((board) => board.memberIds.contains(userId))
+        .where((board) => board.memberIds.contains(demoUserId))
         .length;
 
-    // Active tasks assigned to the user
-    final activeTasks = cardProvider.assignedCardsFor(userId).length;
+    final activeTasks = cardProvider.assignedCardsFor(demoUserId).length;
 
-    // Completed tasks assigned to the user
-    final completedTasks = cardProvider.completedTaskCount(userId);
-
-    // Profile avatar initial
-    final initial = userName.trim().isEmpty
-        ? 'U'
-        : userName.trim()[0].toUpperCase();
+    final completedTasks = cardProvider.completedTaskCount(demoUserId);
 
     final colorScheme = Theme.of(context).colorScheme;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('My Profile')),
       body: ListView(
         padding: const EdgeInsets.all(20),
         children: [
@@ -82,9 +128,17 @@ class ProfileScreen extends StatelessWidget {
 
                 const SizedBox(height: 6),
 
+                Text(
+                  userEmail,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 14, color: Colors.grey),
+                ),
+
+                const SizedBox(height: 10),
+
                 const Chip(
-                  label: Text('Demo Account'),
-                  avatar: Icon(Icons.person_outline, size: 18),
+                  label: Text('Firebase Account'),
+                  avatar: Icon(Icons.verified_user_outlined, size: 18),
                 ),
               ],
             ),
@@ -92,7 +146,7 @@ class ProfileScreen extends StatelessWidget {
 
           const SizedBox(height: 28),
 
-          // Account statistics
+          // Statistics
           Row(
             children: [
               Expanded(
@@ -125,9 +179,17 @@ class ProfileScreen extends StatelessWidget {
             ],
           ),
 
+          const SizedBox(height: 8),
+
+          const Text(
+            'Statistics currently use demo task data.',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 12, color: Colors.grey),
+          ),
+
           const SizedBox(height: 28),
 
-          // Personal information
+          // Account information
           const Text(
             'Account Information',
             style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
@@ -140,16 +202,16 @@ class ProfileScreen extends StatelessWidget {
               children: [
                 ListTile(
                   leading: const Icon(Icons.person_outline),
-                  title: const Text('Name'),
+                  title: const Text('Full Name'),
                   subtitle: Text(userName),
                 ),
 
                 const Divider(height: 1),
 
-                const ListTile(
-                  leading: Icon(Icons.email_outlined),
-                  title: Text('Email'),
-                  subtitle: Text('Not available in demo mode'),
+                ListTile(
+                  leading: const Icon(Icons.email_outlined),
+                  title: const Text('Email'),
+                  subtitle: Text(userEmail),
                 ),
               ],
             ),
@@ -165,16 +227,31 @@ class ProfileScreen extends StatelessWidget {
 
           const SizedBox(height: 12),
 
-          const Card(
+          Card(
             child: ListTile(
-              leading: Icon(Icons.logout, color: Colors.grey),
-              title: Text('Log Out'),
-              subtitle: Text('Available after Firebase Authentication'),
-              trailing: Icon(Icons.lock_outline, color: Colors.grey),
+              leading: const Icon(Icons.logout, color: Colors.red),
+              title: const Text(
+                'Log Out',
+                style: TextStyle(
+                  color: Colors.red,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              subtitle: const Text('Sign out of your BoardBuddy account'),
+              trailing: authProvider.isLoading
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.arrow_forward_ios, size: 16),
+              onTap: authProvider.isLoading
+                  ? null
+                  : () => _confirmLogout(context),
             ),
           ),
 
-          const SizedBox(height: 24),
+          const SizedBox(height: 30),
 
           Center(
             child: Text(

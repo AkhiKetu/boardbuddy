@@ -1,18 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
-// Application theme
 import 'core/theme/app_theme.dart';
 
-// Main navigation
-import 'screens/home/app_shell.dart';
-
 // Providers
+import 'providers/auth_provider.dart';
 import 'providers/board_provider.dart';
 import 'providers/column_provider.dart';
 import 'providers/card_provider.dart';
-
 import 'providers/my_task_provider.dart';
+
+// Authentication navigation
+import 'screens/auth/auth_gate.dart';
 
 class BoardBuddyApp extends StatelessWidget {
   const BoardBuddyApp({super.key});
@@ -21,14 +20,19 @@ class BoardBuddyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
-        // Manages project boards
+        // Firebase Authentication
+        ChangeNotifierProvider(create: (_) => AuthProvider()),
+
+        // Existing board management
         ChangeNotifierProvider(create: (_) => BoardProvider()),
 
-        // Manages Kanban columns
+        // Existing Kanban columns
         ChangeNotifierProvider(create: (_) => ColumnProvider()),
 
-        // Manages task cards
+        // Existing task management
         ChangeNotifierProvider(create: (_) => CardProvider()),
+
+        // Assigned tasks across boards
         ChangeNotifierProvider(
           create: (context) => MyTasksProvider(context.read<CardProvider>()),
         ),
@@ -36,9 +40,14 @@ class BoardBuddyApp extends StatelessWidget {
 
       child: MaterialApp(
         title: 'BoardBuddy',
+
         debugShowCheckedModeBanner: false,
+
+        // Keep the existing theme
         theme: AppTheme.light,
-        home: const AppShell(),
+
+        // Firebase decides the starting screen
+        home: const AuthGate(),
       ),
     );
   }
