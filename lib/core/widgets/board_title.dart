@@ -1,4 +1,3 @@
-
 import 'package:flutter/material.dart';
 
 // Reusable widget for displaying a board
@@ -64,21 +63,14 @@ class BoardTile extends StatelessWidget {
                     Text(
                       '$openCards open cards • '
                       '$memberCount members',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Colors.grey,
-                      ),
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
                     ),
                   ],
                 ),
               ),
 
               // Open board indicator
-              const Icon(
-                Icons.arrow_forward_ios,
-                size: 16,
-                color: Colors.grey,
-              ),
+              const Icon(Icons.arrow_forward_ios, size: 16, color: Colors.grey),
             ],
           ),
         ),

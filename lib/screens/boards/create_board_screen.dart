@@ -1,4 +1,3 @@
-
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -8,13 +7,10 @@ class CreateBoardScreen extends StatefulWidget {
   const CreateBoardScreen({super.key});
 
   @override
-  State<CreateBoardScreen> createState() =>
-      _CreateBoardScreenState();
+  State<CreateBoardScreen> createState() => _CreateBoardScreenState();
 }
 
-class _CreateBoardScreenState
-    extends State<CreateBoardScreen> {
-
+class _CreateBoardScreenState extends State<CreateBoardScreen> {
   // Form key for validation
   final _formKey = GlobalKey<FormState>();
 
@@ -35,9 +31,7 @@ class _CreateBoardScreenState
 
   // Convert HEX string to Color
   Color hexToColor(String hex) {
-    return Color(
-      int.parse(hex.replaceFirst('#', '0xFF')),
-    );
+    return Color(int.parse(hex.replaceFirst('#', '0xFF')));
   }
 
   // Create board using Provider
@@ -62,9 +56,7 @@ class _CreateBoardScreenState
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Create New Board'),
-      ),
+      appBar: AppBar(title: const Text('Create New Board')),
 
       body: Form(
         key: _formKey,
@@ -76,10 +68,7 @@ class _CreateBoardScreenState
             // Board title
             const Text(
               'Board Title',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-              ),
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
             ),
 
             const SizedBox(height: 10),
@@ -92,8 +81,7 @@ class _CreateBoardScreenState
               ),
 
               validator: (value) {
-                if (value == null ||
-                    value.trim().isEmpty) {
+                if (value == null || value.trim().isEmpty) {
                   return 'Please enter a board title';
                 }
                 return null;
@@ -105,10 +93,7 @@ class _CreateBoardScreenState
             // Board colors
             const Text(
               'Choose Board Colour',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-              ),
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
             ),
 
             const SizedBox(height: 15),
@@ -118,8 +103,7 @@ class _CreateBoardScreenState
               runSpacing: 12,
 
               children: colors.map((color) {
-                final isSelected =
-                    selectedColor == color;
+                final isSelected = selectedColor == color;
 
                 return InkWell(
                   onTap: () {
@@ -128,18 +112,14 @@ class _CreateBoardScreenState
                     });
                   },
 
-                  borderRadius:
-                      BorderRadius.circular(30),
+                  borderRadius: BorderRadius.circular(30),
 
                   child: CircleAvatar(
                     radius: 24,
                     backgroundColor: hexToColor(color),
 
                     child: isSelected
-                        ? const Icon(
-                            Icons.check,
-                            color: Colors.white,
-                          )
+                        ? const Icon(Icons.check, color: Colors.white)
                         : null,
                   ),
                 );

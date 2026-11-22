@@ -1,4 +1,3 @@
-
 import 'package:boardbuddy/models/board.dart';
 
 // Temporary board data before Firebase integration
@@ -9,11 +8,7 @@ final List<Board> mockBoards = [
     colorHex: '#6759E8',
     ownerId: 'user1',
     memberIds: ['user1', 'user2', 'user3'],
-    memberNames: {
-      'user1': 'Akhi',
-      'user2': 'Nila',
-      'user3': 'Rafi',
-    },
+    memberNames: {'user1': 'Akhi', 'user2': 'Nila', 'user3': 'Rafi'},
     createdAt: DateTime.now(),
   ),
 
@@ -23,10 +18,7 @@ final List<Board> mockBoards = [
     colorHex: '#1BA995',
     ownerId: 'user1',
     memberIds: ['user1', 'user2'],
-    memberNames: {
-      'user1': 'Akhi',
-      'user2': 'Nila',
-    },
+    memberNames: {'user1': 'Akhi', 'user2': 'Nila'},
     createdAt: DateTime.now(),
   ),
 
@@ -36,10 +28,7 @@ final List<Board> mockBoards = [
     colorHex: '#E7A14C',
     ownerId: 'user1',
     memberIds: ['user1', 'user3'],
-    memberNames: {
-      'user1': 'Akhi',
-      'user3': 'Rafi',
-    },
+    memberNames: {'user1': 'Akhi', 'user3': 'Rafi'},
     createdAt: DateTime.now(),
   ),
 ];
