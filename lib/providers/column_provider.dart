@@ -1,4 +1,3 @@
-
 import 'package:flutter/foundation.dart';
 
 import '../models/board_column.dart';
@@ -38,9 +37,7 @@ class ColumnProvider extends ChangeNotifier {
 
   // Create default columns for a newly created board
   void ensureDefaultColumns(String boardId) {
-    final exists = _columns.any(
-      (column) => column.boardId == boardId,
-    );
+    final exists = _columns.any((column) => column.boardId == boardId);
 
     if (exists) return;
 
@@ -74,37 +71,26 @@ class ColumnProvider extends ChangeNotifier {
   void renameColumn(String columnId, String newTitle) {
     if (newTitle.trim().isEmpty) return;
 
-    final index = _columns.indexWhere(
-      (column) => column.id == columnId,
-    );
+    final index = _columns.indexWhere((column) => column.id == columnId);
 
     if (index == -1) return;
 
-    _columns[index] = _columns[index].copyWith(
-      title: newTitle.trim(),
-    );
+    _columns[index] = _columns[index].copyWith(title: newTitle.trim());
 
     notifyListeners();
   }
 
   // Reorder a column to a new index
-  void reorderColumn(
-    String boardId,
-    String columnId,
-    int newIndex,
-  ) {
+  void reorderColumn(String boardId, String columnId, int newIndex) {
     final ordered = columnsForBoard(boardId).toList();
 
-    final oldIndex = ordered.indexWhere(
-      (column) => column.id == columnId,
-    );
+    final oldIndex = ordered.indexWhere((column) => column.id == columnId);
 
     if (oldIndex == -1) return;
 
     final movingColumn = ordered.removeAt(oldIndex);
 
-    final targetIndex =
-        newIndex.clamp(0, ordered.length).toInt();
+    final targetIndex = newIndex.clamp(0, ordered.length).toInt();
 
     if (oldIndex == targetIndex) return;
 
@@ -132,45 +118,31 @@ class ColumnProvider extends ChangeNotifier {
     }
 
     // Rebalance if positions become too close
-    if (before != null &&
-        after != null &&
-        after - before < 0.000001) {
+    if (before != null && after != null && after - before < 0.000001) {
       for (int i = 0; i < ordered.length; i++) {
         final index = _columns.indexWhere(
           (column) => column.id == ordered[i].id,
         );
 
-        _columns[index] = ordered[i].copyWith(
-          position: (i + 1) * 1000.0,
-        );
+        _columns[index] = ordered[i].copyWith(position: (i + 1) * 1000.0);
       }
     } else {
-      final index = _columns.indexWhere(
-        (column) => column.id == columnId,
-      );
+      final index = _columns.indexWhere((column) => column.id == columnId);
 
-      _columns[index] = movingColumn.copyWith(
-        position: newPosition,
-      );
+      _columns[index] = movingColumn.copyWith(position: newPosition);
     }
 
     notifyListeners();
   }
 
   // Delete a column only when it has no cards
-  bool deleteColumn(
-    String boardId,
-    String columnId, {
-    required bool hasCards,
-  }) {
+  bool deleteColumn(String boardId, String columnId, {required bool hasCards}) {
     if (hasCards) return false;
 
     final before = _columns.length;
 
     _columns.removeWhere(
-      (column) =>
-          column.id == columnId &&
-          column.boardId == boardId,
+      (column) => column.id == columnId && column.boardId == boardId,
     );
 
     if (_columns.length == before) return false;
@@ -181,9 +153,7 @@ class ColumnProvider extends ChangeNotifier {
 
   // Remove columns when their parent board is deleted
   void removeBoardColumns(String boardId) {
-    _columns.removeWhere(
-      (column) => column.boardId == boardId,
-    );
+    _columns.removeWhere((column) => column.boardId == boardId);
 
     notifyListeners();
   }

@@ -2,17 +2,25 @@ import 'package:flutter/material.dart';
 
 import '../../models/board_column.dart';
 
-// Reusable Kanban column widget
 class KanbanColumnWidget extends StatelessWidget {
   final BoardColumn column;
   final List<Widget> cards;
+
   final VoidCallback? onAddCard;
+  final VoidCallback? onRename;
+  final VoidCallback? onMoveLeft;
+  final VoidCallback? onMoveRight;
+  final VoidCallback? onDelete;
 
   const KanbanColumnWidget({
     super.key,
     required this.column,
     this.cards = const [],
     this.onAddCard,
+    this.onRename,
+    this.onMoveLeft,
+    this.onMoveRight,
+    this.onDelete,
   });
 
   @override
@@ -20,17 +28,15 @@ class KanbanColumnWidget extends StatelessWidget {
     return Container(
       width: 260,
       margin: const EdgeInsets.only(right: 12),
-
       decoration: BoxDecoration(
         color: const Color(0xFFEDEFF5),
         borderRadius: BorderRadius.circular(12),
       ),
-
       child: Column(
         children: [
-          // Column title and card count
+          // Column heading
           Padding(
-            padding: const EdgeInsets.all(14),
+            padding: const EdgeInsets.all(10),
             child: Row(
               children: [
                 Expanded(
@@ -40,17 +46,66 @@ class KanbanColumnWidget extends StatelessWidget {
                       fontSize: 16,
                       fontWeight: FontWeight.bold,
                     ),
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
 
-                Chip(label: Text('${cards.length}')),
+                // Card count
+                Chip(
+                  label: Text('${cards.length}'),
+                  visualDensity: VisualDensity.compact,
+                ),
+
+                // Column actions
+                PopupMenuButton<String>(
+                  tooltip: 'Column Options',
+                  icon: const Icon(Icons.more_vert, size: 20),
+                  onSelected: (value) {
+                    switch (value) {
+                      case 'rename':
+                        onRename?.call();
+                        break;
+                      case 'left':
+                        onMoveLeft?.call();
+                        break;
+                      case 'right':
+                        onMoveRight?.call();
+                        break;
+                      case 'delete':
+                        onDelete?.call();
+                        break;
+                    }
+                  },
+                  itemBuilder: (context) => [
+                    PopupMenuItem(
+                      value: 'rename',
+                      enabled: onRename != null,
+                      child: const Text('Rename'),
+                    ),
+                    PopupMenuItem(
+                      value: 'left',
+                      enabled: onMoveLeft != null,
+                      child: const Text('Move Left'),
+                    ),
+                    PopupMenuItem(
+                      value: 'right',
+                      enabled: onMoveRight != null,
+                      child: const Text('Move Right'),
+                    ),
+                    PopupMenuItem(
+                      value: 'delete',
+                      enabled: onDelete != null,
+                      child: const Text('Delete'),
+                    ),
+                  ],
+                ),
               ],
             ),
           ),
 
           const Divider(height: 1),
 
-          // Vertical task area
+          // Task cards area
           Expanded(
             child: cards.isEmpty
                 ? const Center(
@@ -79,7 +134,7 @@ class KanbanColumnWidget extends StatelessWidget {
                   ),
           ),
 
-          // Button will be enabled when CardProvider is ready
+          // Existing Add Card button
           if (onAddCard != null)
             Padding(
               padding: const EdgeInsets.all(12),

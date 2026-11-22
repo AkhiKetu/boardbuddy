@@ -1,11 +1,9 @@
-
 import 'package:flutter/foundation.dart';
 import 'package:boardbuddy/models/board.dart';
 import 'package:boardbuddy/data/mock/mock_boards.dart';
 
 // Manages Board data and notifies the UI
 class BoardProvider extends ChangeNotifier {
-
   // Temporary logged-in user
   // Later this comes from Firebase Authentication
   final String currentUserId = 'user1';
@@ -31,9 +29,7 @@ class BoardProvider extends ChangeNotifier {
       colorHex: colorHex,
       ownerId: currentUserId,
       memberIds: [currentUserId],
-      memberNames: {
-        currentUserId: 'Akhi',
-      },
+      memberNames: {currentUserId: 'Akhi'},
       createdAt: DateTime.now(),
     );
 
@@ -44,17 +40,11 @@ class BoardProvider extends ChangeNotifier {
   }
 
   // Update an existing board
-  void updateBoard(
-    String boardId,
-    String newTitle,
-    String newColorHex,
-  ) {
+  void updateBoard(String boardId, String newTitle, String newColorHex) {
     if (newTitle.trim().isEmpty) return;
 
     final index = _boards.indexWhere(
-      (board) =>
-          board.id == boardId &&
-          board.ownerId == currentUserId,
+      (board) => board.id == boardId && board.ownerId == currentUserId,
     );
 
     if (index == -1) return;
@@ -77,9 +67,7 @@ class BoardProvider extends ChangeNotifier {
   // Delete a board (owner only)
   void deleteBoard(String boardId) {
     final index = _boards.indexWhere(
-      (board) =>
-          board.id == boardId &&
-          board.ownerId == currentUserId,
+      (board) => board.id == boardId && board.ownerId == currentUserId,
     );
 
     if (index == -1) return;

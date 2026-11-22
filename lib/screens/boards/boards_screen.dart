@@ -1,4 +1,3 @@
-
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
@@ -19,11 +18,7 @@ class BoardsScreen extends StatelessWidget {
 
     // Temporary open-card counts
     // Later calculated using CardProvider
-    const mockOpenCounts = {
-      'board1': 8,
-      'board2': 5,
-      'board3': 4,
-    };
+    const mockOpenCounts = {'board1': 8, 'board2': 5, 'board3': 4};
 
     return Scaffold(
       body: ListView.builder(
@@ -42,10 +37,7 @@ class BoardsScreen extends StatelessWidget {
                 children: [
                   Text(
                     'Your Boards',
-                    style: TextStyle(
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
                   ),
                   SizedBox(height: 6),
                   Text(
@@ -75,9 +67,7 @@ class BoardsScreen extends StatelessWidget {
 
           // Convert HEX string to Flutter Color
           final boardColor = Color(
-            int.parse(
-              board.colorHex.replaceFirst('#', '0xFF'),
-            ),
+            int.parse(board.colorHex.replaceFirst('#', '0xFF')),
           );
 
           // Display reusable BoardTile
@@ -92,9 +82,7 @@ class BoardsScreen extends StatelessWidget {
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (context) => KanbanBoardScreen(
-                    selectedBoard: board,
-                  ),
+                  builder: (context) => KanbanBoardScreen(selectedBoard: board),
                 ),
               );
             },
@@ -107,9 +95,7 @@ class BoardsScreen extends StatelessWidget {
         onPressed: () {
           Navigator.push(
             context,
-            MaterialPageRoute(
-              builder: (context) => const CreateBoardScreen(),
-            ),
+            MaterialPageRoute(builder: (context) => const CreateBoardScreen()),
           );
         },
         icon: const Icon(Icons.add),

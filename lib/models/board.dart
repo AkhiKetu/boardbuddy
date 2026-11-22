@@ -1,4 +1,3 @@
-
 class Board {
   // Attributes
   final String id;

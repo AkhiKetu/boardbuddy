@@ -1,8 +1,9 @@
-
 import 'package:flutter/material.dart';
-import '../boards/boards_screen.dart';
 
-// Main navigation screen
+import '../boards/boards_screen.dart';
+import '../tasks/my_tasks_screen.dart';
+import '../profile/profile_screen.dart';
+
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 
@@ -11,42 +12,32 @@ class AppShell extends StatefulWidget {
 }
 
 class _AppShellState extends State<AppShell> {
-  // Current selected tab
+  // Currently selected navigation tab
   int selectedIndex = 0;
 
-  // Titles for each screen
-  final List<String> titles = [
-    'BoardBuddy',
-    'My Tasks',
-    'Profile',
-  ];
+  // App bar titles
+  final List<String> titles = ['Boards', 'My Tasks', 'Profile'];
 
-  //boards 
-final List<Widget> pages = const [
-  BoardsScreen(),
-  Center(child: Text('My Tasks Screen')),
-  Center(child: Text('Profile Screen')),
-];
+  // Screens displayed by the bottom navigation
+  final List<Widget> pages = [
+    const BoardsScreen(),
+    const MyTasksScreen(),
+    const ProfileScreen(),
+  ];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       // Top app bar
-      appBar: AppBar(
-        title: Text(titles[selectedIndex]),
-      ),
+      appBar: AppBar(title: Text(titles[selectedIndex])),
 
       // Display selected screen
-      body: IndexedStack(
-        index: selectedIndex,
-        children: pages,
-      ),
+      body: IndexedStack(index: selectedIndex, children: pages),
 
       // Bottom navigation
       bottomNavigationBar: NavigationBar(
         selectedIndex: selectedIndex,
 
-        // When user clicks a tab
         onDestinationSelected: (index) {
           setState(() {
             selectedIndex = index;
@@ -61,8 +52,8 @@ final List<Widget> pages = const [
           ),
 
           NavigationDestination(
-            icon: Icon(Icons.check_circle_outline),
-            selectedIcon: Icon(Icons.check_circle),
+            icon: Icon(Icons.assignment_outlined),
+            selectedIcon: Icon(Icons.assignment),
             label: 'My Tasks',
           ),
 

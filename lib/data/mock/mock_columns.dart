@@ -1,4 +1,3 @@
-
 import 'package:boardbuddy/models/board_column.dart';
 import 'package:boardbuddy/data/mock/mock_boards.dart';
 
@@ -43,8 +42,6 @@ void initializeMockColumns() {
   mockColumns.clear();
 
   for (final board in mockBoards) {
-    mockColumns.addAll(
-      createDefaultColumns(board.id),
-    );
+    mockColumns.addAll(createDefaultColumns(board.id));
   }
 }
