@@ -1,222 +1,431 @@
+import 'dart:async';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 
-import '../data/mock/mock_task.dart';
 import '../models/task_card.dart';
 import '../models/task_interaction.dart';
+import '../services/card_service.dart';
+import '../services/task_interaction_service.dart';
+import '../services/task_deletion_service.dart';
+import 'board_provider.dart';
 
 class CardProvider extends ChangeNotifier {
-  // Local data storage
-  final List<TaskCard> _cards = List.from(mockTasks);
-  final List<TaskComment> _comments = [];
-  final List<TaskActivity> _activities = [];
-
-  int _idCounter = 0;
-
-  // Initialize activity history for mock tasks
-  CardProvider() {
-    for (final card in _cards) {
-      _activities.add(
-        TaskActivity(
-          id: _newId('activity'),
-          boardId: card.boardId,
-          cardId: card.id,
-          actorId: card.createdBy,
-          action: 'task_created',
-          message: 'Task created',
-          createdAt: card.createdAt,
-        ),
-      );
+  final BoardProvider _boardProvider;
+  final CardService _service;
+  final TaskInteractionService _interactionService;
+  final FirebaseAuth _auth;
+  final FirebaseFirestore _firestore;
+  final TaskDeletionService _deletionService = TaskDeletionService();
+  // Live Firestore card listeners.
+  final Map<String, StreamSubscription<List<TaskCard>>> _subscriptions = {};
+  // Cards grouped by board.
+  final Map<String, List<TaskCard>> _cardsByBoard = {};
+  // Live comment and activity listeners.
+  final Map<String, StreamSubscription<List<TaskComment>>>
+  _commentSubscriptions = {};
+  final Map<String, StreamSubscription<List<TaskActivity>>>
+  _activitySubscriptions = {};
+  // Comments and activity loaded from Firestore.
+  final Map<String, List<TaskComment>> _commentsByCard = {};
+  final Map<String, List<TaskActivity>> _activitiesByCard = {};
+  // Track which board each watched card belongs to.
+  final Map<String, String> _interactionBoardIds = {};
+  String _currentUserId = '';
+  String? _errorMessage;
+  bool _disposed = false;
+  CardProvider(
+    this._boardProvider, {
+    CardService? cardService,
+    TaskInteractionService? interactionService,
+    FirebaseAuth? auth,
+    FirebaseFirestore? firestore,
+  }) : _service = cardService ?? CardService(),
+       _interactionService = interactionService ?? TaskInteractionService(),
+       _auth = auth ?? FirebaseAuth.instance,
+       _firestore = firestore ?? FirebaseFirestore.instance {
+    _boardProvider.addListener(_syncBoards);
+    _syncBoards();
+  }
+  String? get errorMessage => _errorMessage;
+  void _notify() {
+    if (!_disposed) {
+      notifyListeners();
     }
   }
 
-  // Generate unique local IDs
-  String _newId(String prefix) {
-    return '${prefix}_${DateTime.now().microsecondsSinceEpoch}_${_idCounter++}';
+  bool _fail(String message) {
+    _errorMessage = message;
+    _notify();
+    return false;
   }
 
-  // Record task activity
-  void _recordActivity(
-    TaskCard card,
-    String action,
-    String message, {
-    String actorId = 'user1',
-  }) {
-    _activities.add(
-      TaskActivity(
-        id: _newId('activity'),
-        boardId: card.boardId,
-        cardId: card.id,
-        actorId: actorId,
-        action: action,
-        message: message,
-        createdAt: DateTime.now(),
-      ),
-    );
+  // Stop watching a card's comments and activity.
+  void _removeInteractionWatchers(String cardId) {
+    final commentListener = _commentSubscriptions.remove(cardId);
+    final activityListener = _activitySubscriptions.remove(cardId);
+    if (commentListener != null) {
+      unawaited(commentListener.cancel());
+    }
+    if (activityListener != null) {
+      unawaited(activityListener.cancel());
+    }
+    _commentsByCard.remove(cardId);
+    _activitiesByCard.remove(cardId);
+    _interactionBoardIds.remove(cardId);
   }
 
-  // Get visible cards from a column
+  // Stop watching a board and its card interactions.
+  void _removeBoard(String boardId) {
+    final subscription = _subscriptions.remove(boardId);
+    if (subscription != null) {
+      unawaited(subscription.cancel());
+    }
+    _cardsByBoard.remove(boardId);
+    final cardIds = _interactionBoardIds.entries
+        .where((entry) => entry.value == boardId)
+        .map((entry) => entry.key)
+        .toList();
+    for (final cardId in cardIds) {
+      _removeInteractionWatchers(cardId);
+    }
+  }
+
+  // Keep Firestore listeners synchronized with
+  // the authenticated user's accessible boards.
+  void _syncBoards() {
+    if (_disposed) return;
+    final userId = _boardProvider.currentUserId;
+    // Prevent another account from seeing cached data.
+    if (_currentUserId != userId) {
+      for (final boardId in _subscriptions.keys.toList()) {
+        _removeBoard(boardId);
+      }
+      for (final cardId in _interactionBoardIds.keys.toList()) {
+        _removeInteractionWatchers(cardId);
+      }
+      _currentUserId = userId;
+      _cardsByBoard.clear();
+      _errorMessage = null;
+    }
+    final allowedBoardIds = userId.isEmpty
+        ? <String>{}
+        : _boardProvider.boards.map((board) => board.id).toSet();
+    // Remove listeners for inaccessible boards.
+    for (final boardId in _subscriptions.keys.toList()) {
+      if (!allowedBoardIds.contains(boardId)) {
+        _removeBoard(boardId);
+      }
+    }
+    // Start watching accessible boards.
+    for (final boardId in allowedBoardIds) {
+      if (_subscriptions.containsKey(boardId)) {
+        continue;
+      }
+      final listeningUserId = _currentUserId;
+      _subscriptions[boardId] = _service
+          .watchCards(boardId)
+          .listen(
+            (cards) {
+              if (_disposed ||
+                  _currentUserId != listeningUserId ||
+                  !_subscriptions.containsKey(boardId)) {
+                return;
+              }
+              _cardsByBoard[boardId] = cards;
+              // Stop watching interactions of deleted cards.
+              final existingIds = cards.map((card) => card.id).toSet();
+              final removedIds = _interactionBoardIds.entries
+                  .where(
+                    (entry) =>
+                        entry.value == boardId &&
+                        !existingIds.contains(entry.key),
+                  )
+                  .map((entry) => entry.key)
+                  .toList();
+              for (final cardId in removedIds) {
+                _removeInteractionWatchers(cardId);
+              }
+              _errorMessage = null;
+              _notify();
+            },
+            onError: (Object error) {
+              if (_disposed ||
+                  _currentUserId != listeningUserId ||
+                  !_subscriptions.containsKey(boardId)) {
+                return;
+              }
+              debugPrint('Card loading error: $error');
+              _errorMessage = 'Unable to load tasks from Firestore.';
+              _notify();
+            },
+          );
+    }
+    _notify();
+  }
+
+  // All cards from the user's accessible boards.
+  Iterable<TaskCard> get _allCards {
+    return _cardsByBoard.values.expand((cards) => cards);
+  }
+
+  int _compareCards(TaskCard a, TaskCard b) {
+    final positionOrder = a.position.compareTo(b.position);
+    if (positionOrder != 0) return positionOrder;
+    final dateOrder = a.createdAt.compareTo(b.createdAt);
+    if (dateOrder != 0) return dateOrder;
+    return a.id.compareTo(b.id);
+  }
+
+  // Visible cards for one Kanban column.
   List<TaskCard> cardsForColumn(String boardId, String columnId) {
-    final result = _cards.where((card) {
-      return card.boardId == boardId &&
-          card.columnId == columnId &&
-          !card.archived;
-    }).toList();
-
-    result.sort((a, b) {
-      final positionOrder = a.position.compareTo(b.position);
-
-      if (positionOrder != 0) {
-        return positionOrder;
-      }
-
-      final dateOrder = a.createdAt.compareTo(b.createdAt);
-
-      if (dateOrder != 0) {
-        return dateOrder;
-      }
-
-      return a.id.compareTo(b.id);
-    });
-
-    return List.unmodifiable(result);
+    final cards = (_cardsByBoard[boardId] ?? const <TaskCard>[])
+        .where((card) => card.columnId == columnId && !card.archived)
+        .toList();
+    cards.sort(_compareCards);
+    return List.unmodifiable(cards);
   }
 
-  // Check whether a column contains ANY cards.
-  // Includes completed and archived cards.
-  bool hasCardsInColumn(String boardId, String columnId) {
-    return _cards.any(
-      (card) => card.boardId == boardId && card.columnId == columnId,
-    );
-  }
-
-  // Count incomplete and non-archived cards
-  int openCardCount(String boardId) {
-    return _cards.where((card) {
-      return card.boardId == boardId && !card.completed && !card.archived;
-    }).length;
-  }
-
-  // Find a task by ID
   TaskCard? getCard(String cardId) {
-    for (final card in _cards) {
+    for (final card in _allCards) {
       if (card.id == cardId) {
         return card;
       }
     }
-
     return null;
   }
 
-  // Get all active tasks assigned to a user,
-  // across every board.
-  List<TaskCard> assignedCardsFor(String userId) {
-    final tasks = _cards.where((card) {
-      return card.assigneeIds.contains(userId) &&
-          !card.completed &&
-          !card.archived;
-    }).toList();
+  bool hasCardsInColumn(String boardId, String columnId) {
+    return (_cardsByBoard[boardId] ?? const <TaskCard>[]).any(
+      (card) => card.columnId == columnId,
+    );
+  }
 
+  int openCardCount(String boardId) {
+    return (_cardsByBoard[boardId] ?? const <TaskCard>[])
+        .where((card) => !card.completed && !card.archived)
+        .length;
+  }
+
+  List<TaskCard> assignedCardsFor(String userId) {
+    final tasks = _allCards
+        .where(
+          (card) =>
+              card.assigneeIds.contains(userId) &&
+              !card.completed &&
+              !card.archived,
+        )
+        .toList();
+    tasks.sort((a, b) {
+      if (a.dueDate == null && b.dueDate != null) {
+        return 1;
+      }
+      if (a.dueDate != null && b.dueDate == null) {
+        return -1;
+      }
+      if (a.dueDate != null && b.dueDate != null) {
+        final result = a.dueDate!.compareTo(b.dueDate!);
+        if (result != 0) return result;
+      }
+      return a.createdAt.compareTo(b.createdAt);
+    });
     return List.unmodifiable(tasks);
   }
 
-  // Get comments for a specific task
+  int completedTaskCount(String userId) {
+    return _allCards
+        .where((card) => card.assigneeIds.contains(userId) && card.completed)
+        .length;
+  }
+
+  // =====================================
+  // FIRESTORE COMMENTS AND ACTIVITY
+
+  // =====================================
+  // Start listeners only when a card's interactions
+  // are requested (normally in Task Details).
+  void _ensureInteractionListeners(String cardId) {
+    if (_disposed || _currentUserId.isEmpty) return;
+    final card = getCard(cardId);
+    if (card == null) return;
+    if (_interactionBoardIds.containsKey(cardId)) {
+      return;
+    }
+    final boardId = card.boardId;
+    final listeningUserId = _currentUserId;
+    _interactionBoardIds[cardId] = boardId;
+    _commentSubscriptions[cardId] = _interactionService
+        .watchComments(boardId: boardId, cardId: cardId)
+        .listen(
+          (comments) {
+            if (_disposed ||
+                _currentUserId != listeningUserId ||
+                _interactionBoardIds[cardId] != boardId) {
+              return;
+            }
+            _commentsByCard[cardId] = comments;
+            _notify();
+          },
+          onError: (Object error) {
+            debugPrint('Comment loading error: $error');
+            if (_currentUserId == listeningUserId) {
+              _errorMessage = 'Unable to load comments.';
+              _notify();
+            }
+          },
+        );
+    _activitySubscriptions[cardId] = _interactionService
+        .watchActivities(boardId: boardId, cardId: cardId)
+        .listen(
+          (activities) {
+            if (_disposed ||
+                _currentUserId != listeningUserId ||
+                _interactionBoardIds[cardId] != boardId) {
+              return;
+            }
+            _activitiesByCard[cardId] = activities;
+            _notify();
+          },
+          onError: (Object error) {
+            debugPrint('Activity loading error: $error');
+            if (_currentUserId == listeningUserId) {
+              _errorMessage = 'Unable to load activity history.';
+              _notify();
+            }
+          },
+        );
+  }
+
+  // Load real-time comments for a task.
   List<TaskComment> commentsForCard(String cardId) {
-    final result = _comments
-        .where((comment) => comment.cardId == cardId)
-        .toList();
-
-    result.sort((a, b) {
-      final order = a.createdAt.compareTo(b.createdAt);
-
-      if (order != 0) return order;
-
-      return a.id.compareTo(b.id);
-    });
-
-    return List.unmodifiable(result);
+    _ensureInteractionListeners(cardId);
+    return List.unmodifiable(_commentsByCard[cardId] ?? const <TaskComment>[]);
   }
 
-  // Get task activity, newest first
+  // Load real-time activity for a task.
   List<TaskActivity> activitiesForCard(String cardId) {
-    final result = _activities
-        .where((activity) => activity.cardId == cardId)
-        .toList();
-
-    result.sort((a, b) {
-      final order = b.createdAt.compareTo(a.createdAt);
-
-      if (order != 0) return order;
-
-      return b.id.compareTo(a.id);
-    });
-
-    return List.unmodifiable(result);
+    _ensureInteractionListeners(cardId);
+    return List.unmodifiable(
+      _activitiesByCard[cardId] ?? const <TaskActivity>[],
+    );
   }
 
-  // Add a comment
-  void addComment({
+  // Record a task action in Firestore.
+  // Failure is logged separately from the main task write.
+  Future<void> _recordActivity(
+    TaskCard card,
+    String action,
+    String message,
+  ) async {
+    try {
+      await _interactionService.recordActivity(
+        boardId: card.boardId,
+        cardId: card.id,
+        action: action,
+        message: message,
+      );
+    } catch (error) {
+      debugPrint('Save activity error: $error');
+    }
+  }
+
+  // Save comments permanently in Firestore.
+  // The userId parameter is retained for compatibility
+  // with the existing Task Details screen.
+  Future<void> addComment({
     required String cardId,
     required String text,
     String userId = 'user1',
-  }) {
+  }) async {
     final card = getCard(cardId);
-
-    if (card == null || card.archived || text.trim().isEmpty) {
+    if (card == null) {
+      _fail('Task not found.');
       return;
     }
-
-    _comments.add(
-      TaskComment(
-        id: _newId('comment'),
+    if (card.archived) {
+      _fail('Cannot comment on an archived task.');
+      return;
+    }
+    if (text.trim().isEmpty) {
+      _fail('Comment cannot be empty.');
+      return;
+    }
+    try {
+      await _interactionService.postComment(
         boardId: card.boardId,
         cardId: card.id,
-        userId: userId,
         text: text.trim(),
-        createdAt: DateTime.now(),
-      ),
-    );
-
-    _recordActivity(card, 'comment_added', 'Added a comment', actorId: userId);
-
-    notifyListeners();
+      );
+      _errorMessage = null;
+      // Record comment activity after successful saving.
+      unawaited(_recordActivity(card, 'comment_added', 'Added a comment'));
+      // Firestore listeners update the comment list.
+      _notify();
+    } catch (error) {
+      debugPrint('Save comment error: $error');
+      _fail('Unable to save comment.');
+    }
   }
 
-  // Create a new task
-  void addCard({
+  // =====================================
+  // TASK CREATION
+
+  // =====================================
+  Future<bool> addCard({
     required String boardId,
     required String columnId,
     required String title,
     String description = '',
     String createdBy = 'user1',
-  }) {
-    if (title.trim().isEmpty) return;
-
+  }) async {
+    final user = _auth.currentUser;
+    if (user == null) {
+      return _fail('Please sign in first.');
+    }
+    final belongsToBoard = _boardProvider.boards.any(
+      (board) => board.id == boardId,
+    );
+    if (!belongsToBoard) {
+      return _fail('You cannot access this board.');
+    }
     final existing = cardsForColumn(boardId, columnId);
-
     final position = existing.isEmpty
         ? 1000.0
         : existing.last.position + 1000.0;
-
-    final card = TaskCard(
-      id: _newId('task'),
-      boardId: boardId,
-      columnId: columnId,
-      title: title.trim(),
-      description: description.trim(),
-      position: position,
-      createdBy: createdBy,
-      createdAt: DateTime.now(),
-    );
-
-    _cards.add(card);
-
-    _recordActivity(card, 'task_created', 'Task created', actorId: createdBy);
-
-    notifyListeners();
+    try {
+      final cardId = await _service.addCard(
+        boardId: boardId,
+        columnId: columnId,
+        title: title.trim(),
+        description: description.trim(),
+        position: position,
+      );
+      final newCard = TaskCard(
+        id: cardId,
+        boardId: boardId,
+        columnId: columnId,
+        title: title.trim(),
+        description: description.trim(),
+        position: position,
+        createdBy: user.uid,
+        createdAt: DateTime.now(),
+      );
+      unawaited(_recordActivity(newCard, 'task_created', 'Task created'));
+      _errorMessage = null;
+      _notify();
+      return true;
+    } catch (error) {
+      debugPrint('Create task error: $error');
+      return _fail('Unable to create task. Check Firestore permissions.');
+    }
   }
 
-  // Update task information
-  void updateCard(
+  // =====================================
+  // TASK EDITING
+
+  // =====================================
+  Future<bool> updateCard(
     String cardId, {
     String? title,
     String? description,
@@ -225,123 +434,61 @@ class CardProvider extends ChangeNotifier {
     DateTime? dueDate,
     bool clearDueDate = false,
     List<ChecklistItem>? checklist,
-  }) {
-    final index = _cards.indexWhere((card) => card.id == cardId);
-
-    if (index == -1) return;
-
-    if (title != null && title.trim().isEmpty) {
-      return;
+  }) async {
+    final card = getCard(cardId);
+    if (card == null) {
+      return _fail('Task not found.');
     }
-
-    final oldCard = _cards[index];
-    final changes = <String>[];
-
-    if (title != null && title.trim() != oldCard.title) {
-      changes.add('title');
+    try {
+      await _service.updateCard(
+        boardId: card.boardId,
+        cardId: card.id,
+        title: title,
+        description: description,
+        assigneeIds: assigneeIds,
+        labels: labels,
+        dueDate: dueDate,
+        clearDueDate: clearDueDate,
+        checklist: checklist,
+      );
+      unawaited(_recordActivity(card, 'task_updated', 'Updated task details'));
+      _errorMessage = null;
+      _notify();
+      return true;
+    } catch (error) {
+      debugPrint('Update task error: $error');
+      return _fail('Unable to update task.');
     }
-
-    if (description != null && description != oldCard.description) {
-      changes.add('description');
-    }
-
-    if (assigneeIds != null && !listEquals(assigneeIds, oldCard.assigneeIds)) {
-      changes.add('assignees');
-    }
-
-    if (labels != null) {
-      final oldValues = oldCard.labels
-          .map((label) => '${label.name}:${label.colorHex}')
-          .toList();
-
-      final newValues = labels
-          .map((label) => '${label.name}:${label.colorHex}')
-          .toList();
-
-      if (!listEquals(oldValues, newValues)) {
-        changes.add('labels');
-      }
-    }
-
-    if (clearDueDate) {
-      if (oldCard.dueDate != null) {
-        changes.add('due date');
-      }
-    } else if (dueDate != null && dueDate != oldCard.dueDate) {
-      changes.add('due date');
-    }
-
-    if (checklist != null) {
-      final oldItems = oldCard.checklist
-          .map((item) => '${item.id}:${item.text}:${item.isChecked}')
-          .toList();
-
-      final newItems = checklist
-          .map((item) => '${item.id}:${item.text}:${item.isChecked}')
-          .toList();
-
-      if (!listEquals(oldItems, newItems)) {
-        changes.add('checklist');
-      }
-    }
-
-    // No changes means no update
-    if (changes.isEmpty) return;
-
-    final updated = oldCard.copyWith(
-      title: title?.trim(),
-      description: description,
-      assigneeIds: assigneeIds,
-      labels: labels,
-      dueDate: dueDate,
-      clearDueDate: clearDueDate,
-      checklist: checklist,
-    );
-
-    _cards[index] = updated;
-
-    _recordActivity(updated, 'task_updated', 'Updated ${changes.join(', ')}');
-
-    notifyListeners();
   }
 
-  // Move or reorder a task
-  void moveCard({
+  // =====================================
+  // DRAG AND DROP
+
+  // =====================================
+  Future<bool> moveCard({
     required String cardId,
     required String targetColumnId,
     required int newIndex,
-  }) {
+  }) async {
     final card = getCard(cardId);
-
-    if (card == null || card.archived || targetColumnId.isEmpty) {
-      return;
+    if (card == null || card.archived) {
+      return _fail('Task is unavailable.');
     }
-
-    final sourceCards = cardsForColumn(card.boardId, card.columnId);
-
-    final oldIndex = sourceCards.indexWhere((item) => item.id == cardId);
-
-    // Remove the moving task from destination ordering
     final targetCards = cardsForColumn(
       card.boardId,
       targetColumnId,
     ).where((item) => item.id != cardId).toList();
-
     final index = newIndex.clamp(0, targetCards.length).toInt();
-
-    if (card.columnId == targetColumnId && oldIndex == index) {
-      return;
+    if (card.columnId == targetColumnId) {
+      final original = cardsForColumn(card.boardId, targetColumnId);
+      final oldIndex = original.indexWhere((item) => item.id == cardId);
+      if (oldIndex == index) return true;
     }
-
-    // Neighbor positions
     final double? before = index > 0 ? targetCards[index - 1].position : null;
-
     final double? after = index < targetCards.length
         ? targetCards[index].position
         : null;
-
     double position;
-
     if (before == null && after == null) {
       position = 1000.0;
     } else if (before == null) {
@@ -351,137 +498,203 @@ class CardProvider extends ChangeNotifier {
     } else {
       position = (before + after) / 2;
     }
-
-    final updated = card.copyWith(columnId: targetColumnId, position: position);
-
-    // Rebalance when numeric gaps become too small
-    if (before != null && after != null && after - before < 0.000001) {
-      targetCards.insert(index, updated);
-
-      for (int i = 0; i < targetCards.length; i++) {
-        final itemIndex = _cards.indexWhere(
-          (item) => item.id == targetCards[i].id,
-        );
-
-        if (itemIndex != -1) {
-          _cards[itemIndex] = targetCards[i].copyWith(
-            position: (i + 1) * 1000.0,
-          );
+    try {
+      // Rebalance when two positions are too close.
+      if (before != null && after != null && after - before < 0.000001) {
+        final orderedCards = List<TaskCard>.from(targetCards);
+        orderedCards.insert(index, card);
+        final batch = _firestore.batch();
+        final collection = _firestore
+            .collection('boards')
+            .doc(card.boardId)
+            .collection('cards');
+        for (int i = 0; i < orderedCards.length; i++) {
+          final updates = <String, dynamic>{'position': (i + 1) * 1000.0};
+          if (orderedCards[i].id == cardId) {
+            updates['columnId'] = targetColumnId;
+          }
+          batch.update(collection.doc(orderedCards[i].id), updates);
         }
+        await batch.commit();
+      } else {
+        // Normal moves update one card document.
+        await _service.moveCard(
+          boardId: card.boardId,
+          cardId: card.id,
+          columnId: targetColumnId,
+          position: position,
+        );
       }
-    } else {
-      final cardIndex = _cards.indexWhere((item) => item.id == cardId);
-
-      if (cardIndex == -1) return;
-
-      _cards[cardIndex] = updated;
+      unawaited(
+        _recordActivity(
+          card,
+          'task_moved',
+          card.columnId == targetColumnId
+              ? 'Reordered task'
+              : 'Moved task to another column',
+        ),
+      );
+      _errorMessage = null;
+      _notify();
+      return true;
+    } catch (error) {
+      debugPrint('Move task error: $error');
+      return _fail('Unable to move task.');
     }
-
-    _recordActivity(
-      updated,
-      'task_moved',
-      card.columnId == targetColumnId
-          ? 'Reordered task'
-          : 'Moved task to another column',
-    );
-
-    notifyListeners();
   }
 
-  // Complete or reopen a task
-  void setCompleted(String cardId, bool completed) {
-    final index = _cards.indexWhere((card) => card.id == cardId);
+  // =====================================
+  // COMPLETION
 
-    if (index == -1) return;
-
-    final card = _cards[index];
-
-    if (card.completed == completed) return;
-
-    final updated = card.copyWith(completed: completed);
-
-    _cards[index] = updated;
-
-    _recordActivity(
-      updated,
-      completed ? 'task_completed' : 'task_reopened',
-      completed ? 'Marked task as completed' : 'Marked task as incomplete',
-    );
-
-    notifyListeners();
+  // =====================================
+  Future<bool> setCompleted(String cardId, bool completed) async {
+    final card = getCard(cardId);
+    if (card == null) {
+      return _fail('Task not found.');
+    }
+    if (card.completed == completed) return true;
+    try {
+      await _service.setCompleted(
+        boardId: card.boardId,
+        cardId: card.id,
+        completed: completed,
+      );
+      unawaited(
+        _recordActivity(
+          card,
+          completed ? 'task_completed' : 'task_reopened',
+          completed ? 'Marked task as completed' : 'Marked task as incomplete',
+        ),
+      );
+      _errorMessage = null;
+      _notify();
+      return true;
+    } catch (error) {
+      debugPrint('Complete task error: $error');
+      return _fail('Unable to update completion.');
+    }
   }
 
-  // Toggle a checklist item
-  void toggleChecklistItem(String cardId, String itemId) {
-    final index = _cards.indexWhere((card) => card.id == cardId);
+  // =====================================
+  // CHECKLIST
 
-    if (index == -1) return;
-
-    final card = _cards[index];
-
-    if (!card.checklist.any((item) => item.id == itemId)) {
-      return;
+  // =====================================
+  Future<bool> toggleChecklistItem(String cardId, String itemId) async {
+    final card = getCard(cardId);
+    if (card == null) {
+      return _fail('Task not found.');
     }
-
-    final updatedChecklist = card.checklist.map((item) {
+    final hasItem = card.checklist.any((item) => item.id == itemId);
+    if (!hasItem) return false;
+    final checklist = card.checklist.map((item) {
       if (item.id == itemId) {
         return item.copyWith(isChecked: !item.isChecked);
       }
-
       return item;
     }).toList();
-
-    final updated = card.copyWith(checklist: updatedChecklist);
-
-    _cards[index] = updated;
-
-    _recordActivity(updated, 'checklist_updated', 'Updated checklist progress');
-
-    notifyListeners();
+    try {
+      await _service.updateCard(
+        boardId: card.boardId,
+        cardId: card.id,
+        checklist: checklist,
+      );
+      unawaited(
+        _recordActivity(
+          card,
+          'checklist_updated',
+          'Updated checklist progress',
+        ),
+      );
+      _errorMessage = null;
+      _notify();
+      return true;
+    } catch (error) {
+      debugPrint('Checklist error: $error');
+      return _fail('Unable to update checklist.');
+    }
   }
 
-  // Archive or restore a task
-  void setArchived(String cardId, bool archived) {
-    final index = _cards.indexWhere((card) => card.id == cardId);
+  // =====================================
+  // ARCHIVE
 
-    if (index == -1) return;
-
-    final card = _cards[index];
-
-    if (card.archived == archived) return;
-
-    final updated = card.copyWith(archived: archived);
-
-    _cards[index] = updated;
-
-    _recordActivity(
-      updated,
-      archived ? 'task_archived' : 'task_restored',
-      archived ? 'Archived task' : 'Restored task',
-    );
-
-    notifyListeners();
-  }
-
-  // Delete task and its comments/activity
-  void deleteCard(String cardId) {
+  // =====================================
+  Future<bool> setArchived(String cardId, bool archived) async {
     final card = getCard(cardId);
-
-    if (card == null) return;
-
-    _cards.removeWhere((item) => item.id == cardId);
-
-    _comments.removeWhere((comment) => comment.cardId == cardId);
-
-    _activities.removeWhere((activity) => activity.cardId == cardId);
-
-    notifyListeners();
+    if (card == null) {
+      return _fail('Task not found.');
+    }
+    try {
+      await _service.setArchived(
+        boardId: card.boardId,
+        cardId: card.id,
+        archived: archived,
+      );
+      unawaited(
+        _recordActivity(
+          card,
+          archived ? 'task_archived' : 'task_restored',
+          archived ? 'Archived task' : 'Restored task',
+        ),
+      );
+      _errorMessage = null;
+      _notify();
+      return true;
+    } catch (error) {
+      debugPrint('Archive task error: $error');
+      return _fail('Unable to archive task.');
+    }
   }
 
-  // Count completed tasks assigned to this user
-  int completedTaskCount(String userId) {
-    return _cards.where((card) {
-      return card.assigneeIds.contains(userId) && card.completed;
-    }).length;
+  // Only the board owner can permanently delete a task.
+  // The service removes comments and activity first.
+  Future<bool> deleteCard(String cardId) async {
+    final card = getCard(cardId);
+    if (card == null) {
+      return _fail('Task not found.');
+    }
+    if (_currentUserId.isEmpty) {
+      return _fail('Please sign in first.');
+    }
+    try {
+      await _deletionService.deleteTask(boardId: card.boardId, cardId: card.id);
+      // Firestore card and interaction listeners update the UI.
+      _errorMessage = null;
+      _notify();
+      return true;
+    } catch (error) {
+      debugPrint('Delete task error: $error');
+      return _fail(
+        'Unable to delete task. Only the board owner can delete it. '
+        'Check your connection and permissions.',
+      );
+    }
+  }
+
+  void clearError() {
+    _errorMessage = null;
+    _notify();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _boardProvider.removeListener(_syncBoards);
+    for (final subscription in _subscriptions.values) {
+      unawaited(subscription.cancel());
+    }
+    for (final subscription in _commentSubscriptions.values) {
+      unawaited(subscription.cancel());
+    }
+    for (final subscription in _activitySubscriptions.values) {
+      unawaited(subscription.cancel());
+    }
+    _subscriptions.clear();
+    _commentSubscriptions.clear();
+    _activitySubscriptions.clear();
+    _cardsByBoard.clear();
+    _commentsByCard.clear();
+    _activitiesByCard.clear();
+    _interactionBoardIds.clear();
+    super.dispose();
   }
 }

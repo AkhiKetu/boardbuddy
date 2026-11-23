@@ -11,16 +11,16 @@ class CreateBoardScreen extends StatefulWidget {
 }
 
 class _CreateBoardScreenState extends State<CreateBoardScreen> {
-  // Form key for validation
+  // Form validation
   final _formKey = GlobalKey<FormState>();
 
-  // Controller for board title
+  // Board title
   final _titleController = TextEditingController();
 
   // Default board color
   String selectedColor = '#6759E8';
 
-  // Available board colors
+  // Available colors
   final List<String> colors = [
     '#6759E8',
     '#1BA995',
@@ -29,22 +29,51 @@ class _CreateBoardScreenState extends State<CreateBoardScreen> {
     '#3689DB',
   ];
 
-  // Convert HEX string to Color
+  // Convert HEX to Flutter Color
   Color hexToColor(String hex) {
     return Color(int.parse(hex.replaceFirst('#', '0xFF')));
   }
 
-  // Create board using Provider
-  void createBoard() {
-    if (_formKey.currentState!.validate()) {
-      context.read<BoardProvider>().createBoard(
-        _titleController.text.trim(),
-        selectedColor,
-      );
-
-      // Return to Boards screen
-      Navigator.pop(context);
+  // Create board in Firebase Firestore
+  Future<void> createBoard() async {
+    if (!_formKey.currentState!.validate()) {
+      return;
     }
+
+    final boardProvider = context.read<BoardProvider>();
+
+    if (boardProvider.isCreating) return;
+
+    FocusScope.of(context).unfocus();
+
+    // Wait for Firestore to save the board.
+    final boardId = await boardProvider.createBoard(
+      _titleController.text.trim(),
+      selectedColor,
+    );
+
+    if (!mounted) return;
+
+    // Creation failed
+    if (boardId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            boardProvider.errorMessage ?? 'Unable to create board.',
+          ),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    // Creation succeeded
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Board created successfully!')),
+    );
+
+    // Return to Boards screen
+    Navigator.pop(context);
   }
 
   @override
@@ -55,15 +84,16 @@ class _CreateBoardScreenState extends State<CreateBoardScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Listen for board creation progress.
+    final isCreating = context.watch<BoardProvider>().isCreating;
+
     return Scaffold(
       appBar: AppBar(title: const Text('Create New Board')),
 
       body: Form(
         key: _formKey,
-
         child: ListView(
           padding: const EdgeInsets.all(20),
-
           children: [
             // Board title
             const Text(
@@ -75,22 +105,33 @@ class _CreateBoardScreenState extends State<CreateBoardScreen> {
 
             TextFormField(
               controller: _titleController,
+              maxLength: 100,
+              enabled: !isCreating,
+              textCapitalization: TextCapitalization.words,
               decoration: const InputDecoration(
                 hintText: 'Enter board title',
-                prefixIcon: Icon(Icons.dashboard),
+                prefixIcon: Icon(Icons.dashboard_outlined),
+                border: OutlineInputBorder(),
               ),
 
               validator: (value) {
-                if (value == null || value.trim().isEmpty) {
+                final title = value?.trim() ?? '';
+
+                if (title.isEmpty) {
                   return 'Please enter a board title';
                 }
+
+                if (title.length > 100) {
+                  return 'Maximum 100 characters allowed';
+                }
+
                 return null;
               },
             ),
 
-            const SizedBox(height: 30),
+            const SizedBox(height: 25),
 
-            // Board colors
+            // Board color selection
             const Text(
               'Choose Board Colour',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
@@ -101,23 +142,21 @@ class _CreateBoardScreenState extends State<CreateBoardScreen> {
             Wrap(
               spacing: 12,
               runSpacing: 12,
-
               children: colors.map((color) {
                 final isSelected = selectedColor == color;
 
                 return InkWell(
-                  onTap: () {
-                    setState(() {
-                      selectedColor = color;
-                    });
-                  },
-
+                  onTap: isCreating
+                      ? null
+                      : () {
+                          setState(() {
+                            selectedColor = color;
+                          });
+                        },
                   borderRadius: BorderRadius.circular(30),
-
                   child: CircleAvatar(
                     radius: 24,
                     backgroundColor: hexToColor(color),
-
                     child: isSelected
                         ? const Icon(Icons.check, color: Colors.white)
                         : null,
@@ -131,11 +170,30 @@ class _CreateBoardScreenState extends State<CreateBoardScreen> {
             // Create Board button
             SizedBox(
               width: double.infinity,
+              height: 50,
               child: ElevatedButton.icon(
-                onPressed: createBoard,
-                icon: const Icon(Icons.add),
-                label: const Text('Create Board'),
+                onPressed: isCreating ? null : createBoard,
+
+                icon: isCreating
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.add),
+
+                label: Text(isCreating ? 'Creating Board...' : 'Create Board'),
               ),
+            ),
+
+            const SizedBox(height: 16),
+
+            // Firebase status information
+            const Text(
+              'Your board will be saved securely '
+              'to Cloud Firestore.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, color: Colors.grey),
             ),
           ],
         ),

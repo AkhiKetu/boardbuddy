@@ -1,160 +1,318 @@
+import 'dart:async';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/board_column.dart';
-import '../data/mock/mock_columns.dart';
+import '../services/column_service.dart';
 
-// Manages all board columns
 class ColumnProvider extends ChangeNotifier {
-  // Private list of columns
-  final List<BoardColumn> _columns = [];
+  final ColumnService _service = ColumnService();
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final FirebaseAuth _auth = FirebaseAuth.instance;
 
-  // Load sample columns when Provider is created
+  final Map<String, List<BoardColumn>> _columns = {};
+  final Map<String, StreamSubscription<List<BoardColumn>>> _listeners = {};
+  final Set<String> _initializingBoards = {};
+
+  StreamSubscription<User?>? _authSubscription;
+  String? _activeUserId;
+  String? _errorMessage;
+  bool _disposed = false;
+
   ColumnProvider() {
-    initializeMockColumns();
-    _columns.addAll(mockColumns);
-  }
+    _activeUserId = _auth.currentUser?.uid;
 
-  // Get columns belonging to a particular board
-  List<BoardColumn> columnsForBoard(String boardId) {
-    final result = _columns
-        .where((column) => column.boardId == boardId)
-        .toList();
+    _authSubscription = _auth.authStateChanges().listen((user) {
+      final uid = user?.uid;
 
-    // Display columns in numeric position order
-    result.sort((a, b) {
-      final order = a.position.compareTo(b.position);
+      if (uid == _activeUserId) return;
 
-      if (order != 0) return order;
+      _activeUserId = uid;
 
-      final time = a.createdAt.compareTo(b.createdAt);
-      if (time != 0) return time;
+      // Clear the previous user's column data.
+      for (final listener in _listeners.values) {
+        unawaited(listener.cancel());
+      }
 
-      return a.id.compareTo(b.id);
+      _listeners.clear();
+      _columns.clear();
+      _initializingBoards.clear();
+      _errorMessage = null;
+
+      _notify();
     });
-
-    return List.unmodifiable(result);
   }
 
-  // Create default columns for a newly created board
+  String? get errorMessage => _errorMessage;
+
+  void _notify() {
+    if (!_disposed) notifyListeners();
+  }
+
+  // Get all columns belonging to a board.
+  List<BoardColumn> columnsForBoard(String boardId) {
+    return List.unmodifiable(_columns[boardId] ?? []);
+  }
+
+  // Start listening for real-time column changes.
+  void _watchColumns(String boardId) {
+    if (_listeners.containsKey(boardId)) return;
+
+    _listeners[boardId] = _service
+        .watchColumns(boardId)
+        .listen(
+          (updatedColumns) {
+            _columns[boardId] = updatedColumns;
+            _errorMessage = null;
+            _notify();
+          },
+          onError: (Object error) {
+            debugPrint('Column loading error: $error');
+            _errorMessage = 'Unable to load columns.';
+            _notify();
+          },
+        );
+  }
+
+  // Create default columns only when a board
+  // has no columns saved in Firestore.
   void ensureDefaultColumns(String boardId) {
-    final exists = _columns.any((column) => column.boardId == boardId);
+    if (_auth.currentUser == null) return;
 
-    if (exists) return;
+    _watchColumns(boardId);
 
-    _columns.addAll(createDefaultColumns(boardId));
-    notifyListeners();
+    if (!_initializingBoards.add(boardId)) return;
+
+    unawaited(_createDefaultColumns(boardId));
   }
 
-  // Add a new custom column
-  void addColumn(String boardId, String title) {
-    if (title.trim().isEmpty) return;
+  Future<void> _createDefaultColumns(String boardId) async {
+    try {
+      final collection = _firestore
+          .collection('boards')
+          .doc(boardId)
+          .collection('columns');
 
-    final existing = columnsForBoard(boardId);
+      // Check the server, not just the local cache.
+      final existing = await collection.get(
+        const GetOptions(source: Source.server),
+      );
 
-    final newPosition = existing.isEmpty
-        ? 1000.0
-        : existing.last.position + 1000.0;
+      if (existing.docs.isNotEmpty) return;
 
-    final column = BoardColumn(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
-      boardId: boardId,
-      title: title.trim(),
-      position: newPosition,
-      createdAt: DateTime.now(),
-    );
+      // Stable IDs prevent duplicate default columns.
+      final refs = [
+        collection.doc('${boardId}_todo'),
+        collection.doc('${boardId}_doing'),
+        collection.doc('${boardId}_done'),
+      ];
 
-    _columns.add(column);
-    notifyListeners();
+      const titles = ['To Do', 'Doing', 'Done'];
+      const positions = [1000.0, 2000.0, 3000.0];
+
+      // A transaction makes this safe if two
+      // devices initialize the board together.
+      await _firestore.runTransaction((transaction) async {
+        final snapshots = [];
+
+        // Firestore requires reads before writes.
+        for (final ref in refs) {
+          snapshots.add(await transaction.get(ref));
+        }
+
+        for (int i = 0; i < refs.length; i++) {
+          if (snapshots[i].exists) continue;
+
+          transaction.set(refs[i], {
+            'title': titles[i],
+            'position': positions[i],
+            'createdAt': FieldValue.serverTimestamp(),
+          });
+        }
+      });
+    } catch (error) {
+      debugPrint('Default column creation error: $error');
+      _errorMessage = 'Unable to initialize board columns.';
+      _notify();
+    } finally {
+      _initializingBoards.remove(boardId);
+    }
   }
 
-  // Rename an existing column
-  void renameColumn(String columnId, String newTitle) {
-    if (newTitle.trim().isEmpty) return;
+  // Add a new column and save it to Firestore.
+  Future<bool> addColumn(String boardId, String title) async {
+    if (title.trim().isEmpty) return false;
 
-    final index = _columns.indexWhere((column) => column.id == columnId);
+    ensureDefaultColumns(boardId);
 
-    if (index == -1) return;
+    try {
+      final existing = columnsForBoard(boardId);
 
-    _columns[index] = _columns[index].copyWith(title: newTitle.trim());
+      final position = existing.isEmpty
+          ? 1000.0
+          : existing.last.position + 1000.0;
 
-    notifyListeners();
+      await _service.addColumn(
+        boardId: boardId,
+        title: title.trim(),
+        position: position,
+      );
+
+      _errorMessage = null;
+      return true;
+    } catch (error) {
+      debugPrint('Add column error: $error');
+      _errorMessage = 'Unable to add column.';
+      _notify();
+      return false;
+    }
   }
 
-  // Reorder a column to a new index
-  void reorderColumn(String boardId, String columnId, int newIndex) {
-    final ordered = columnsForBoard(boardId).toList();
+  // Rename a column in Firestore.
+  Future<bool> renameColumn(String columnId, String title) async {
+    if (title.trim().isEmpty) return false;
 
-    final oldIndex = ordered.indexWhere((column) => column.id == columnId);
+    String? boardId;
 
-    if (oldIndex == -1) return;
+    for (final entry in _columns.entries) {
+      if (entry.value.any((column) => column.id == columnId)) {
+        boardId = entry.key;
+        break;
+      }
+    }
 
-    final movingColumn = ordered.removeAt(oldIndex);
+    if (boardId == null) return false;
 
-    final targetIndex = newIndex.clamp(0, ordered.length).toInt();
+    try {
+      await _service.renameColumn(
+        boardId: boardId,
+        columnId: columnId,
+        title: title.trim(),
+      );
 
-    if (oldIndex == targetIndex) return;
+      _errorMessage = null;
+      return true;
+    } catch (error) {
+      debugPrint('Rename column error: $error');
+      _errorMessage = 'Unable to rename column.';
+      _notify();
+      return false;
+    }
+  }
 
-    ordered.insert(targetIndex, movingColumn);
+  // Move a column left or right.
+  Future<bool> reorderColumn(
+    String boardId,
+    String columnId,
+    int newIndex,
+  ) async {
+    final columns = List<BoardColumn>.from(columnsForBoard(boardId));
 
-    // Calculate a position between neighbours
+    final oldIndex = columns.indexWhere((column) => column.id == columnId);
+
+    if (oldIndex == -1) return false;
+
+    final movingColumn = columns.removeAt(oldIndex);
+
+    final targetIndex = newIndex.clamp(0, columns.length).toInt();
+
+    if (oldIndex == targetIndex) return true;
+
+    columns.insert(targetIndex, movingColumn);
+
     final double? before = targetIndex > 0
-        ? ordered[targetIndex - 1].position
+        ? columns[targetIndex - 1].position
         : null;
 
-    final double? after = targetIndex < ordered.length - 1
-        ? ordered[targetIndex + 1].position
+    final double? after = targetIndex < columns.length - 1
+        ? columns[targetIndex + 1].position
         : null;
 
-    double newPosition;
+    double position;
 
     if (before == null && after == null) {
-      newPosition = 1000.0;
+      position = 1000.0;
     } else if (before == null) {
-      newPosition = after! - 1000.0;
+      position = after! - 1000.0;
     } else if (after == null) {
-      newPosition = before + 1000.0;
+      position = before + 1000.0;
     } else {
-      newPosition = (before + after) / 2;
+      position = (before + after) / 2;
     }
 
-    // Rebalance if positions become too close
-    if (before != null && after != null && after - before < 0.000001) {
-      for (int i = 0; i < ordered.length; i++) {
-        final index = _columns.indexWhere(
-          (column) => column.id == ordered[i].id,
+    try {
+      // Rebalance if there is no usable numeric gap.
+      if (before != null && after != null && after - before < 0.000001) {
+        final batch = _firestore.batch();
+
+        for (int i = 0; i < columns.length; i++) {
+          final ref = _firestore
+              .collection('boards')
+              .doc(boardId)
+              .collection('columns')
+              .doc(columns[i].id);
+
+          batch.update(ref, {'position': (i + 1) * 1000.0});
+        }
+
+        await batch.commit();
+      } else {
+        await _service.updatePosition(
+          boardId: boardId,
+          columnId: columnId,
+          position: position,
         );
-
-        _columns[index] = ordered[i].copyWith(position: (i + 1) * 1000.0);
       }
-    } else {
-      final index = _columns.indexWhere((column) => column.id == columnId);
 
-      _columns[index] = movingColumn.copyWith(position: newPosition);
+      _errorMessage = null;
+      return true;
+    } catch (error) {
+      debugPrint('Reorder column error: $error');
+      _errorMessage = 'Unable to reorder column.';
+      _notify();
+      return false;
+    }
+  }
+
+  // Deletion stays disabled until Firestore
+  // cards and safe deletion are implemented.
+  bool deleteColumn(String boardId, String columnId, {required bool hasCards}) {
+    _errorMessage = hasCards
+        ? 'Move or delete the cards before removing this column.'
+        : 'Column deletion will be enabled after task migration.';
+
+    _notify();
+    return false;
+  }
+
+  // Clear the local column cache for a board.
+  // Does not delete any Firestore documents.
+  void removeBoardColumns(String boardId) {
+    final listener = _listeners.remove(boardId);
+
+    if (listener != null) {
+      unawaited(listener.cancel());
     }
 
-    notifyListeners();
+    _columns.remove(boardId);
+    _initializingBoards.remove(boardId);
+
+    _notify();
   }
 
-  // Delete a column only when it has no cards
-  bool deleteColumn(String boardId, String columnId, {required bool hasCards}) {
-    if (hasCards) return false;
+  @override
+  void dispose() {
+    _disposed = true;
 
-    final before = _columns.length;
+    _authSubscription?.cancel();
 
-    _columns.removeWhere(
-      (column) => column.id == columnId && column.boardId == boardId,
-    );
+    for (final listener in _listeners.values) {
+      unawaited(listener.cancel());
+    }
 
-    if (_columns.length == before) return false;
-
-    notifyListeners();
-    return true;
-  }
-
-  // Remove columns when their parent board is deleted
-  void removeBoardColumns(String boardId) {
-    _columns.removeWhere((column) => column.boardId == boardId);
-
-    notifyListeners();
+    _listeners.clear();
+    super.dispose();
   }
 }
