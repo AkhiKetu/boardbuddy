@@ -1,79 +1,233 @@
+import 'dart:async';
+
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
-import 'package:boardbuddy/models/board.dart';
-import 'package:boardbuddy/data/mock/mock_boards.dart';
 
-// Manages Board data and notifies the UI
+import '../models/board.dart';
+import '../services/board_service.dart';
+
 class BoardProvider extends ChangeNotifier {
-  // Temporary logged-in user
-  // Later this comes from Firebase Authentication
-  final String currentUserId = 'user1';
+  final FirebaseAuth _auth;
+  final BoardService _boardService;
 
-  // Private list of boards
-  final List<Board> _boards = List.from(mockBoards);
+  late final StreamSubscription<User?> _authSubscription;
+  StreamSubscription<List<Board>>? _boardSubscription;
 
-  // Getter: Boards owned or joined by current user
-  List<Board> get boards {
-    return _boards.where((board) {
-      return board.ownerId == currentUserId ||
-          board.memberIds.contains(currentUserId);
-    }).toList();
+  List<Board> _boards = [];
+
+  String _currentUserId = '';
+  String? _errorMessage;
+
+  bool _isLoading = false;
+  bool _isCreating = false;
+  bool _disposed = false;
+
+  int _streamVersion = 0;
+
+  BoardProvider({FirebaseAuth? auth, BoardService? boardService})
+    : _auth = auth ?? FirebaseAuth.instance,
+      _boardService = boardService ?? BoardService() {
+    // Automatically respond to login and logout.
+    _authSubscription = _auth.authStateChanges().listen(
+      _onAuthChanged,
+      onError: (Object error) {
+        _isLoading = false;
+        _errorMessage = 'Unable to check login status.';
+        _notify();
+      },
+    );
   }
 
-  // Create a new board
-  void createBoard(String title, String colorHex) {
-    if (title.trim().isEmpty) return;
+  // Current real Firebase user ID
+  String get currentUserId => _currentUserId;
 
-    final newBoard = Board(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
-      title: title.trim(),
-      colorHex: colorHex,
-      ownerId: currentUserId,
-      memberIds: [currentUserId],
-      memberNames: {currentUserId: 'Akhi'},
-      createdAt: DateTime.now(),
-    );
+  // Boards accessible to the logged-in user
+  List<Board> get boards => List.unmodifiable(_boards);
 
-    _boards.add(newBoard);
+  bool get isLoading => _isLoading;
+  bool get isCreating => _isCreating;
 
-    // Update all listening widgets
-    notifyListeners();
+  String? get errorMessage => _errorMessage;
+
+  // Notify safely
+  void _notify() {
+    if (!_disposed) {
+      notifyListeners();
+    }
   }
 
-  // Update an existing board
-  void updateBoard(String boardId, String newTitle, String newColorHex) {
-    if (newTitle.trim().isEmpty) return;
+  // Listen to the correct user's boards
+  void _onAuthChanged(User? user) {
+    final newUserId = user?.uid ?? '';
 
-    final index = _boards.indexWhere(
-      (board) => board.id == boardId && board.ownerId == currentUserId,
-    );
+    if (_currentUserId == newUserId) {
+      return;
+    }
 
-    if (index == -1) return;
+    // Prevent results from an old user appearing
+    // after the account changes.
+    final version = ++_streamVersion;
 
-    final oldBoard = _boards[index];
+    if (_boardSubscription != null) {
+      unawaited(_boardSubscription!.cancel());
+      _boardSubscription = null;
+    }
 
-    _boards[index] = Board(
-      id: oldBoard.id,
-      title: newTitle.trim(),
-      colorHex: newColorHex,
-      ownerId: oldBoard.ownerId,
-      memberIds: oldBoard.memberIds,
-      memberNames: oldBoard.memberNames,
-      createdAt: oldBoard.createdAt,
-    );
+    _currentUserId = newUserId;
+    _boards = [];
+    _errorMessage = null;
+    _isLoading = newUserId.isNotEmpty;
 
-    notifyListeners();
+    _notify();
+
+    // No user means no boards.
+    if (newUserId.isEmpty) {
+      return;
+    }
+
+    // Firestore pushes updates in real time.
+    _boardSubscription = _boardService
+        .watchBoardsForUser(newUserId)
+        .listen(
+          (updatedBoards) {
+            if (_disposed || version != _streamVersion) {
+              return;
+            }
+
+            _boards = updatedBoards;
+            _isLoading = false;
+            _errorMessage = null;
+
+            _notify();
+          },
+          onError: (Object error) {
+            if (_disposed || version != _streamVersion) {
+              return;
+            }
+
+            debugPrint('Board loading error: $error');
+
+            _isLoading = false;
+            _errorMessage =
+                'Unable to load boards. Check your connection '
+                'and Firestore permissions.';
+
+            _notify();
+          },
+        );
   }
 
-  // Delete a board (owner only)
+  // Create and save a board in Firestore
+  Future<String?> createBoard(String title, String colorHex) async {
+    if (_isCreating) return null;
+
+    if (_currentUserId.isEmpty) {
+      _errorMessage = 'Please sign in first.';
+      _notify();
+      return null;
+    }
+
+    if (title.trim().isEmpty) {
+      _errorMessage = 'Board title is required.';
+      _notify();
+      return null;
+    }
+
+    _isCreating = true;
+    _errorMessage = null;
+    _notify();
+
+    try {
+      final boardId = await _boardService.createBoard(
+        title: title.trim(),
+        colorHex: colorHex,
+      );
+
+      // The Firestore stream automatically adds
+      // the board to the local list.
+      return boardId;
+    } catch (error) {
+      debugPrint('Board creation error: $error');
+
+      _errorMessage =
+          'Unable to create board. '
+          'Check your connection and permissions.';
+
+      return null;
+    } finally {
+      _isCreating = false;
+      _notify();
+    }
+  }
+
+  // Update an existing board in Firestore
+  Future<bool> updateBoard(
+    String boardId,
+    String newTitle,
+    String newColorHex,
+  ) async {
+    final boardIndex = _boards.indexWhere((board) => board.id == boardId);
+
+    if (boardIndex == -1) {
+      _errorMessage = 'Board not found.';
+      _notify();
+      return false;
+    }
+
+    // Owner-only board editing
+    if (_boards[boardIndex].ownerId != _currentUserId) {
+      _errorMessage = 'Only the board owner can edit it.';
+      _notify();
+      return false;
+    }
+
+    try {
+      _errorMessage = null;
+
+      await _boardService.updateBoard(
+        boardId: boardId,
+        title: newTitle.trim(),
+        colorHex: newColorHex,
+      );
+
+      // Firestore stream handles the UI refresh.
+      return true;
+    } catch (error) {
+      debugPrint('Board update error: $error');
+
+      _errorMessage = 'Unable to update the board.';
+      _notify();
+
+      return false;
+    }
+  }
+
+  // Board deletion is intentionally disabled
+  // until columns and cards have been migrated.
+  // Deleting a Firestore board document alone
+  // does NOT delete its subcollections.
   void deleteBoard(String boardId) {
-    final index = _boards.indexWhere(
-      (board) => board.id == boardId && board.ownerId == currentUserId,
-    );
+    _errorMessage =
+        'Board deletion will be available after '
+        'safe Firestore deletion is implemented.';
 
-    if (index == -1) return;
+    _notify();
+  }
 
-    _boards.removeAt(index);
+  // Clear an old error
+  void clearError() {
+    _errorMessage = null;
+    _notify();
+  }
 
-    notifyListeners();
+  @override
+  void dispose() {
+    _disposed = true;
+    _streamVersion++;
+
+    _authSubscription.cancel();
+    _boardSubscription?.cancel();
+
+    super.dispose();
   }
 }

@@ -23,30 +23,29 @@ class BoardBuddyApp extends StatelessWidget {
         // Firebase Authentication
         ChangeNotifierProvider(create: (_) => AuthProvider()),
 
-        // Existing board management
+        // Firestore board management
         ChangeNotifierProvider(create: (_) => BoardProvider()),
 
-        // Existing Kanban columns
+        // Firestore Kanban columns
         ChangeNotifierProvider(create: (_) => ColumnProvider()),
 
-        // Existing task management
-        ChangeNotifierProvider(create: (_) => CardProvider()),
+        // Firestore task cards
+        ChangeNotifierProvider(
+          create: (context) => CardProvider(context.read<BoardProvider>()),
+        ),
 
         // Assigned tasks across boards
         ChangeNotifierProvider(
           create: (context) => MyTasksProvider(context.read<CardProvider>()),
         ),
       ],
-
       child: MaterialApp(
         title: 'BoardBuddy',
-
         debugShowCheckedModeBanner: false,
-
-        // Keep the existing theme
         theme: AppTheme.light,
 
-        // Firebase decides the starting screen
+        // Automatically displays Login or the main app
+        // based on Firebase Authentication status.
         home: const AuthGate(),
       ),
     );
