@@ -1,38 +1,189 @@
+import 'dart:async';
+
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
 import '../models/task_card.dart';
 import 'card_provider.dart';
 
-// The four sections required for My Tasks
 enum MyTaskGroup { overdue, today, thisWeek, later }
 
 class MyTasksProvider extends ChangeNotifier {
   final CardProvider _cardProvider;
 
-  MyTasksProvider(this._cardProvider) {
-    // Refresh My Tasks when a card changes
-    _cardProvider.addListener(_onCardsChanged);
+  final FirebaseFirestore _firestore;
+
+  final Map<String, StreamSubscription<QuerySnapshot<Map<String, dynamic>>>>
+  _subscriptions = {};
+
+  final Map<String, Set<String>> _assignedIdsByBoard = {};
+
+  final Map<String, Object> _watchTokens = {};
+
+  final Set<String> _pendingBoards = {};
+
+  final Map<String, String> _errors = {};
+
+  String _currentUserId = '';
+
+  bool _disposed = false;
+
+  MyTasksProvider(this._cardProvider, {FirebaseFirestore? firestore})
+    : _firestore = firestore ?? FirebaseFirestore.instance {
+    _cardProvider.addListener(_syncQueries);
+    _syncQueries();
   }
 
-  void _onCardsChanged() {
-    notifyListeners();
+  bool get isLoading => _pendingBoards.isNotEmpty;
+
+  String? get errorMessage => _errors.isEmpty ? null : _errors.values.first;
+
+  void _notify() {
+    if (!_disposed) notifyListeners();
   }
 
-  // Return active tasks assigned to a user
+  // Stop watching a board.
+  void _removeBoard(String boardId) {
+    _watchTokens.remove(boardId);
+
+    final subscription = _subscriptions.remove(boardId);
+
+    if (subscription != null) {
+      unawaited(subscription.cancel());
+    }
+
+    _assignedIdsByBoard.remove(boardId);
+    _pendingBoards.remove(boardId);
+    _errors.remove(boardId);
+  }
+
+  // Synchronize queries with the current user
+  // and their accessible boards.
+  void _syncQueries() {
+    if (_disposed) return;
+
+    final userId = _cardProvider.currentUserId;
+
+    // Clear old data when switching accounts.
+    if (_currentUserId != userId) {
+      for (final boardId in _subscriptions.keys.toList()) {
+        _removeBoard(boardId);
+      }
+
+      _assignedIdsByBoard.clear();
+      _pendingBoards.clear();
+      _errors.clear();
+
+      _currentUserId = userId;
+    }
+
+    final allowedBoardIds = userId.isEmpty
+        ? <String>{}
+        : _cardProvider.accessibleBoardIds;
+
+    // Stop listening when membership is removed.
+    for (final boardId in _subscriptions.keys.toList()) {
+      if (!allowedBoardIds.contains(boardId)) {
+        _removeBoard(boardId);
+      }
+    }
+
+    // Start one secure collection-group query
+    // for each accessible board.
+    for (final boardId in allowedBoardIds) {
+      if (_subscriptions.containsKey(boardId)) continue;
+
+      final token = Object();
+
+      _watchTokens[boardId] = token;
+      _pendingBoards.add(boardId);
+
+      _subscriptions[boardId] = _firestore
+          .collectionGroup('cards')
+          .where('boardId', isEqualTo: boardId)
+          .where('assigneeIds', arrayContains: userId)
+          .snapshots()
+          .listen(
+            (snapshot) {
+              if (_disposed ||
+                  _currentUserId != userId ||
+                  _watchTokens[boardId] != token ||
+                  !_cardProvider.accessibleBoardIds.contains(boardId)) {
+                return;
+              }
+
+              _assignedIdsByBoard[boardId] = snapshot.docs
+                  .where(
+                    (doc) =>
+                        doc.reference.parent.parent?.path == 'boards/$boardId',
+                  )
+                  .map((doc) => doc.id)
+                  .toSet();
+
+              _pendingBoards.remove(boardId);
+              _errors.remove(boardId);
+
+              _notify();
+            },
+            onError: (Object error) {
+              if (_disposed ||
+                  _currentUserId != userId ||
+                  _watchTokens[boardId] != token) {
+                return;
+              }
+
+              debugPrint('My Tasks query error: $error');
+
+              _assignedIdsByBoard.remove(boardId);
+              _pendingBoards.remove(boardId);
+
+              _errors[boardId] =
+                  'Unable to load assigned tasks. '
+                  'Check your connection, Firestore rules '
+                  'and indexes.';
+
+              _notify();
+            },
+          );
+    }
+
+    _notify();
+  }
+
+  // Retry failed queries.
+  void retry() {
+    for (final boardId in _subscriptions.keys.toList()) {
+      _removeBoard(boardId);
+    }
+
+    _syncQueries();
+  }
+
+  // Use collection-group results to select assigned
+  // cards, reusing CardProvider's existing models.
   List<TaskCard> tasksForUser(String userId) {
-    return _cardProvider.assignedCardsFor(userId);
+    if (userId.isEmpty || userId != _currentUserId) {
+      return [];
+    }
+
+    return _cardProvider
+        .assignedCardsFor(userId)
+        .where(
+          (task) =>
+              _assignedIdsByBoard[task.boardId]?.contains(task.id) ?? false,
+        )
+        .toList();
   }
 
-  // Remove the time portion from a date
+  // Remove the time portion.
   DateTime _dateOnly(DateTime date) {
-    final localDate = date.toLocal();
+    final local = date.toLocal();
 
-    return DateTime(localDate.year, localDate.month, localDate.day);
+    return DateTime(local.year, local.month, local.day);
   }
 
-  // Determine which group a task belongs to
+  // Determine a task's due-date group.
   MyTaskGroup getTaskGroup(TaskCard task, {DateTime? referenceDate}) {
-    // Tasks without a deadline belong to Later
     if (task.dueDate == null) {
       return MyTaskGroup.later;
     }
@@ -41,29 +192,29 @@ class MyTasksProvider extends ChangeNotifier {
 
     final dueDate = _dateOnly(task.dueDate!);
 
-    // Before today
     if (dueDate.isBefore(today)) {
       return MyTaskGroup.overdue;
     }
 
-    // Due today
     if (dueDate.isAtSameMomentAs(today)) {
       return MyTaskGroup.today;
     }
 
-    // End of current calendar week (Sunday)
-    final endOfWeek = today.add(Duration(days: 7 - today.weekday));
+    // End of the current calendar week.
+    final endOfWeek = DateTime(
+      today.year,
+      today.month,
+      today.day + 7 - today.weekday,
+    );
 
-    // Tomorrow through Sunday
     if (!dueDate.isAfter(endOfWeek)) {
       return MyTaskGroup.thisWeek;
     }
 
-    // Next week, future dates and no due date
     return MyTaskGroup.later;
   }
 
-  // Get tasks grouped by due date
+  // Group all active assigned tasks.
   Map<MyTaskGroup, List<TaskCard>> groupedTasks(
     String userId, {
     DateTime? referenceDate,
@@ -75,18 +226,14 @@ class MyTasksProvider extends ChangeNotifier {
       MyTaskGroup.later: [],
     };
 
-    final tasks = tasksForUser(userId);
-
-    for (final task in tasks) {
+    for (final task in tasksForUser(userId)) {
       final group = getTaskGroup(task, referenceDate: referenceDate);
 
       groups[group]!.add(task);
     }
 
-    // Sort cards by nearest due date
     for (final groupTasks in groups.values) {
       groupTasks.sort((a, b) {
-        // Tasks with no due date go last
         if (a.dueDate == null && b.dueDate != null) {
           return 1;
         }
@@ -112,15 +259,26 @@ class MyTasksProvider extends ChangeNotifier {
     return groups;
   }
 
-  // Count all active assigned tasks
   int totalAssignedTasks(String userId) {
     return tasksForUser(userId).length;
   }
 
-  // Release the listener when the Provider is disposed
   @override
   void dispose() {
-    _cardProvider.removeListener(_onCardsChanged);
+    _disposed = true;
+
+    _cardProvider.removeListener(_syncQueries);
+
+    for (final subscription in _subscriptions.values) {
+      unawaited(subscription.cancel());
+    }
+
+    _subscriptions.clear();
+    _assignedIdsByBoard.clear();
+    _watchTokens.clear();
+    _pendingBoards.clear();
+    _errors.clear();
+
     super.dispose();
   }
 }

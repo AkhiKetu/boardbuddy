@@ -11,19 +11,20 @@ class TaskInteractionService {
     : _firestore = firestore ?? FirebaseFirestore.instance,
       _auth = auth ?? FirebaseAuth.instance;
 
-  // Reference to one task card.
+  // Board reference.
+  DocumentReference<Map<String, dynamic>> _boardRef(String boardId) {
+    return _firestore.collection('boards').doc(boardId);
+  }
+
+  // Card reference.
   DocumentReference<Map<String, dynamic>> _cardRef(
     String boardId,
     String cardId,
   ) {
-    return _firestore
-        .collection('boards')
-        .doc(boardId)
-        .collection('cards')
-        .doc(cardId);
+    return _boardRef(boardId).collection('cards').doc(cardId);
   }
 
-  // Reference to a task's comments.
+  // Comments reference.
   CollectionReference<Map<String, dynamic>> _commentsRef(
     String boardId,
     String cardId,
@@ -31,7 +32,7 @@ class TaskInteractionService {
     return _cardRef(boardId, cardId).collection('comments');
   }
 
-  // Reference to a task's activity history.
+  // Activity reference.
   CollectionReference<Map<String, dynamic>> _activityRef(
     String boardId,
     String cardId,
@@ -39,7 +40,46 @@ class TaskInteractionService {
     return _cardRef(boardId, cardId).collection('activity');
   }
 
-  // Convert a Firestore comment into a model.
+  // Get the authenticated member's name from the board.
+  Future<String> _getMemberName(String boardId, String userId) async {
+    final board = await _boardRef(boardId)
+        .get(const GetOptions(source: Source.server));
+
+    if (!board.exists) {
+      throw StateError('Board not found.');
+    }
+
+    final data = board.data()!;
+
+    final members = List<String>.from(data['memberIds'] ?? []);
+
+    if (!members.contains(userId)) {
+      throw StateError('You cannot access this board.');
+    }
+
+    if (data['deleting'] == true) {
+      throw StateError('This board is being deleted.');
+    }
+
+    final names = Map<String, dynamic>.from(data['memberNames'] ?? {});
+
+    final name = names[userId];
+
+    if (name is! String || name.trim().isEmpty || name.length > 100) {
+      throw StateError('Member name not available.');
+    }
+
+    if (_auth.currentUser?.uid != userId) {
+      throw StateError('Your account has changed.');
+    }
+
+    return name;
+  }
+
+  // =====================================
+  // CONVERT COMMENT DOCUMENT
+  // =====================================
+
   TaskComment _commentFromDocument(
     String boardId,
     String cardId,
@@ -52,13 +92,24 @@ class TaskInteractionService {
       id: document.id,
       boardId: boardId,
       cardId: cardId,
-      userId: data['userId'] as String,
+
+      // Support old and new comment documents.
+      userId: (data['authorId'] ?? data['userId'] ?? '') as String,
+
+      authorName: (data['authorName'] ?? '') as String,
+
       text: data['text'] as String,
-      createdAt: timestamp is Timestamp ? timestamp.toDate() : DateTime.now(),
+
+      createdAt: timestamp is Timestamp
+          ? timestamp.toDate()
+          : DateTime.fromMillisecondsSinceEpoch(0),
     );
   }
 
-  // Convert a Firestore activity entry into a model.
+  // =====================================
+  // CONVERT ACTIVITY DOCUMENT
+  // =====================================
+
   TaskActivity _activityFromDocument(
     String boardId,
     String cardId,
@@ -71,14 +122,25 @@ class TaskInteractionService {
       id: document.id,
       boardId: boardId,
       cardId: cardId,
-      actorId: data['actorId'] as String,
+
+      actorId: (data['actorId'] ?? '') as String,
+
+      actorName: (data['actorName'] ?? '') as String,
+
       action: data['action'] as String,
-      message: data['message'] as String,
-      createdAt: timestamp is Timestamp ? timestamp.toDate() : DateTime.now(),
+
+      message: (data['message'] ?? data['action']) as String,
+
+      createdAt: timestamp is Timestamp
+          ? timestamp.toDate()
+          : DateTime.fromMillisecondsSinceEpoch(0),
     );
   }
 
-  // Listen to the latest comments in real time.
+  // =====================================
+  // REAL-TIME COMMENTS
+  // =====================================
+
   Stream<List<TaskComment>> watchComments({
     required String boardId,
     required String cardId,
@@ -93,14 +155,17 @@ class TaskInteractionService {
           .map((document) => _commentFromDocument(boardId, cardId, document))
           .toList();
 
-      // Show comments oldest first in the UI.
+      // Display oldest comments first.
       comments.sort((a, b) => a.createdAt.compareTo(b.createdAt));
 
       return List<TaskComment>.unmodifiable(comments);
     });
   }
 
-  // Listen to the latest activity in real time.
+  // =====================================
+  // REAL-TIME ACTIVITY HISTORY
+  // =====================================
+
   Stream<List<TaskActivity>> watchActivities({
     required String boardId,
     required String cardId,
@@ -115,13 +180,17 @@ class TaskInteractionService {
           .map((document) => _activityFromDocument(boardId, cardId, document))
           .toList();
 
+      // Latest activity first.
       activities.sort((a, b) => b.createdAt.compareTo(a.createdAt));
 
       return List<TaskActivity>.unmodifiable(activities);
     });
   }
 
-  // Save a new comment in Firestore.
+  // =====================================
+  // POST COMMENT
+  // =====================================
+
   Future<void> postComment({
     required String boardId,
     required String cardId,
@@ -139,14 +208,24 @@ class TaskInteractionService {
       throw ArgumentError('Comment must contain 1–2000 characters.');
     }
 
+    final authorName = await _getMemberName(boardId, user.uid);
+
+    if (_auth.currentUser?.uid != user.uid) {
+      throw StateError('Your account has changed.');
+    }
+
     await _commentsRef(boardId, cardId).add({
-      'userId': user.uid,
+      'authorId': user.uid,
+      'authorName': authorName,
       'text': cleanText,
       'createdAt': FieldValue.serverTimestamp(),
     });
   }
 
-  // Save a task activity entry in Firestore.
+  // =====================================
+  // RECORD ACTIVITY
+  // =====================================
+
   Future<void> recordActivity({
     required String boardId,
     required String cardId,
@@ -181,8 +260,15 @@ class TaskInteractionService {
       throw ArgumentError('Invalid activity message.');
     }
 
+    final actorName = await _getMemberName(boardId, user.uid);
+
+    if (_auth.currentUser?.uid != user.uid) {
+      throw StateError('Your account has changed.');
+    }
+
     await _activityRef(boardId, cardId).add({
       'actorId': user.uid,
+      'actorName': actorName,
       'action': action,
       'message': cleanMessage,
       'createdAt': FieldValue.serverTimestamp(),

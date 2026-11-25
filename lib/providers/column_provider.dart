@@ -6,9 +6,12 @@ import 'package:flutter/foundation.dart';
 
 import '../models/board_column.dart';
 import '../services/column_service.dart';
+import '../services/column_deletion_service.dart';
 
 class ColumnProvider extends ChangeNotifier {
   final ColumnService _service = ColumnService();
+  final ColumnDeletionService _deletionService = ColumnDeletionService();
+
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;
 
@@ -112,12 +115,11 @@ class ColumnProvider extends ChangeNotifier {
       const titles = ['To Do', 'Doing', 'Done'];
       const positions = [1000.0, 2000.0, 3000.0];
 
-      // A transaction makes this safe if two
-      // devices initialize the board together.
+      // Prevent duplicate default columns when
+      // multiple devices initialize the board.
       await _firestore.runTransaction((transaction) async {
         final snapshots = [];
 
-        // Firestore requires reads before writes.
         for (final ref in refs) {
           snapshots.add(await transaction.get(ref));
         }
@@ -243,7 +245,7 @@ class ColumnProvider extends ChangeNotifier {
     }
 
     try {
-      // Rebalance if there is no usable numeric gap.
+      // Rebalance when the numeric gap is too small.
       if (before != null && after != null && after - before < 0.000001) {
         final batch = _firestore.batch();
 
@@ -276,15 +278,57 @@ class ColumnProvider extends ChangeNotifier {
     }
   }
 
-  // Deletion stays disabled until Firestore
-  // cards and safe deletion are implemented.
-  bool deleteColumn(String boardId, String columnId, {required bool hasCards}) {
-    _errorMessage = hasCards
-        ? 'Move or delete the cards before removing this column.'
-        : 'Column deletion will be enabled after task migration.';
+  // =====================================
+  // COLUMN DELETION
+  // =====================================
 
-    _notify();
-    return false;
+  Future<bool> deleteColumn(
+    String boardId,
+    String columnId, {
+    required bool hasCards,
+  }) async {
+    if (_auth.currentUser == null) {
+      _errorMessage = 'Please sign in first.';
+      _notify();
+      return false;
+    }
+
+    // Prevent deletion when the local card list
+    // contains tasks in this column.
+    if (hasCards) {
+      _errorMessage = 'Move or delete the cards before removing this column.';
+      _notify();
+      return false;
+    }
+
+    try {
+      // Check ownership and existing cards
+      // directly from Firestore.
+      final deleted = await _deletionService.deleteEmptyColumn(
+        boardId: boardId,
+        columnId: columnId,
+      );
+
+      if (!deleted) {
+        _errorMessage = 'Only the board owner can delete an empty column.';
+        _notify();
+        return false;
+      }
+
+      _errorMessage = null;
+
+      // The Firestore listener updates the Kanban board.
+      _notify();
+
+      return true;
+    } catch (error) {
+      debugPrint('Column deletion error: $error');
+
+      _errorMessage = 'Unable to delete column. Check Firestore permissions.';
+
+      _notify();
+      return false;
+    }
   }
 
   // Clear the local column cache for a board.
@@ -313,6 +357,7 @@ class ColumnProvider extends ChangeNotifier {
     }
 
     _listeners.clear();
+
     super.dispose();
   }
 }
