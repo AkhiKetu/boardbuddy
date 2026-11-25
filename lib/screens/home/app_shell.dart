@@ -12,29 +12,29 @@ class AppShell extends StatefulWidget {
 }
 
 class _AppShellState extends State<AppShell> {
-  // Currently selected navigation tab
   int selectedIndex = 0;
 
-  // App bar titles
-  final List<String> titles = ['Boards', 'My Tasks', 'Profile'];
+  static const List<String> titles = ['Boards', 'My Tasks', 'Profile'];
 
-  // Screens displayed by the bottom navigation
-  final List<Widget> pages = [
-    const BoardsScreen(),
-    const MyTasksScreen(),
-    const ProfileScreen(),
+  static const List<Widget> pages = [
+    BoardsScreen(),
+    MyTasksScreen(),
+    ProfileScreen(),
   ];
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      // Top app bar
-      appBar: AppBar(title: Text(titles[selectedIndex])),
+      // Single application AppBar.
+      appBar: AppBar(
+        title: Text(titles[selectedIndex]),
+        automaticallyImplyLeading: false,
+      ),
 
-      // Display selected screen
+      // Preserve the state of each tab.
       body: IndexedStack(index: selectedIndex, children: pages),
 
-      // Bottom navigation
+      // Bottom navigation.
       bottomNavigationBar: NavigationBar(
         selectedIndex: selectedIndex,
 
